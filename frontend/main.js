@@ -22,13 +22,13 @@ async function loadEmails(){
   for(const e of emails){
     const card = document.createElement("div");
     card.className = "card";
-    card.innerHTML = \`
-      <div><b>\${e.subject || "(no subject)"}<\/b></div>
-      <div>From: \${e.sender}</div>
-      <div><i>\${new Date(parseInt(e.internal_date||0)).toLocaleString()}<\/i></div>
-      <div>\${e.snippet}</div>
-      <div>Important: \${e.is_important} | Reply needed: \${e.reply_needed}</div>
-    \`;
+    card.innerHTML = `
+      <div><b>${e.subject || "(no subject)"}</b></div>
+      <div>From: ${e.sender}</div>
+      <div><i>${new Date(parseInt(e.internal_date || 0)).toLocaleString()}</i></div>
+      <div>${e.snippet}</div>
+      <div>Important: ${e.is_important} | Reply needed: ${e.reply_needed}</div>
+    `;
     el.appendChild(card);
   }
 }

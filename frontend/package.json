@@ -6,5 +6,8 @@
   "scripts": {
     "dev": "vite"
   },
-  "dependencies": {}
+  "dependencies": {},
+  "devDependencies": {
+    "vite": "^5.2.0"
+  }
 }
