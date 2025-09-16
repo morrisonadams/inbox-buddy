@@ -21,7 +21,9 @@ def classify(email_text: str) -> dict:
     prompt = f"""{SYSTEM}
 
 Email:
-"""{email_text}"""
+\"\"\"
+{email_text}
+\"\"\"
 
 Return JSON only with keys: importance, reply_needed, importance_score, reply_needed_score, rationale.
 """
@@ -52,7 +54,9 @@ def answer_question(context_text: str, question: str) -> str:
     prompt = f"""You are a helpful inbox analyst. Use only the context provided to answer the question.
 
 Context:
-"""{context_text}"""
+\"\"\"
+{context_text}
+\"\"\"
 
 Question: {question}
 
