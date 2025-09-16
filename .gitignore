@@ -1,0 +1,13 @@
+.env
+backend/.env
+backend/token.json
+backend/credentials.json
+backend/.credentials/
+backend/__pycache__/
+backend/db.sqlite3
+node_modules
+dist
+.idea
+.vscode
+__pycache__
+*.pyc

@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Inbox Buddy</title>
+  <link rel="manifest" href="/manifest.json">
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; padding: 16px; }
+    .row { display: flex; gap: 12px; margin-bottom: 12px; }
+    .card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; margin-bottom: 10px; }
+    .btn { padding: 8px 12px; border-radius: 8px; border: 1px solid #ccc; background: #f8f8f8; cursor: pointer; }
+    .btn:active { transform: translateY(1px); }
+    #answer { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Inbox Buddy</h1>
+  <div class="row">
+    <button id="connect" class="btn">Connect Gmail</button>
+    <button id="enableNotifs" class="btn">Enable Notifications</button>
+    <button id="refresh" class="btn">Refresh Emails</button>
+  </div>
+
+  <div class="row">
+    <input id="question" placeholder="Ask about your inbox..." style="flex:1; padding:8px; border-radius:8px; border:1px solid #ccc;">
+    <button id="ask" class="btn">Ask</button>
+  </div>
+
+  <h3>Answer</h3>
+  <div id="answer" class="card"></div>
+
+  <h3>Recent emails</h3>
+  <div id="emails"></div>
+
+  <script type="module" src="/main.js"></script>
+</body>
+</html>

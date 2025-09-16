@@ -1,0 +1,9 @@
+{
+  "name": "Inbox Buddy",
+  "short_name": "InboxBuddy",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "description": "Local inbox assistant",
+  "icons": []
+}
