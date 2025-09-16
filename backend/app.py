@@ -12,7 +12,16 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from db import init_db, SessionLocal, Email
-from gmail_client import get_gmail, list_recent_unread, get_message, extract_payload, ensure_auth
+from gmail_client import (
+    AuthRequired,
+    complete_auth_flow,
+    ensure_auth,
+    get_gmail,
+    list_recent_unread,
+    get_message,
+    extract_payload,
+    start_auth_flow,
+)
 from triage import classify, answer_question
 
 load_dotenv()
@@ -40,10 +49,43 @@ def health():
     return {"ok": True}
 
 @app.get("/auth/start")
-def auth_start():
-    # Trigger ensure_auth to run OAuth flow if needed
-    ensure_auth()
-    return {"ok": True}
+def auth_start(request: Request):
+    try:
+        ensure_auth()
+        return {"already_authenticated": True}
+    except AuthRequired:
+        callback_url = str(request.url_for("auth_callback"))
+        try:
+            auth_url = start_auth_flow(callback_url)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"auth_url": auth_url}
+
+
+@app.get("/auth/callback", response_class=HTMLResponse)
+def auth_callback(state: str = "", code: str = "", error: str = ""):
+    if error:
+        return HTMLResponse(
+            f"<html><body><h3>Authentication failed: {error}</h3></body></html>",
+            status_code=400,
+        )
+    if not state or not code:
+        raise HTTPException(status_code=400, detail="Missing state or code")
+
+    try:
+        complete_auth_flow(state, code)
+    except AuthRequired as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    body = """
+    <html>
+        <body>
+            <h3>Authentication complete. You can close this tab.</h3>
+            <script>window.close();</script>
+        </body>
+    </html>
+    """
+    return HTMLResponse(body)
 
 @app.get("/emails")
 def get_emails(limit: int = 50):

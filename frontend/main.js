@@ -69,7 +69,21 @@ function connectSSE(){
 document.getElementById("refresh").onclick = loadEmails;
 document.getElementById("ask").onclick = ask;
 document.getElementById("enableNotifs").onclick = enableNotifs;
-document.getElementById("connect").onclick = ()=> jget("/auth/start").then(()=>alert("If prompted, complete Google login in the new tab.")).catch(e=>alert(e.message));
+document.getElementById("connect").onclick = () =>
+  jget("/auth/start")
+    .then(res => {
+      if(res.already_authenticated){
+        alert("Gmail is already connected.");
+        return;
+      }
+      if(res.auth_url){
+        window.open(res.auth_url, "_blank", "noopener,noreferrer");
+        alert("Complete Google login in the opened tab, then return here.");
+        return;
+      }
+      alert("Authentication response received.");
+    })
+    .catch(e => alert(e.message));
 
 loadEmails();
 connectSSE();
