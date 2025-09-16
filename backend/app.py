@@ -1,8 +1,8 @@
 import asyncio
-import os
 import json
-import time
-from typing import List, Dict
+import logging
+import os
+from typing import Dict
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,9 +27,24 @@ from triage import classify, answer_question
 load_dotenv()
 init_db()
 
+LOG_LEVEL_NAME = os.getenv("LOG_LEVEL", "INFO").upper()
+LOG_LEVEL = getattr(logging, LOG_LEVEL_NAME, logging.INFO)
+logging.basicConfig(
+    level=LOG_LEVEL,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    force=True,
+)
+logger = logging.getLogger("inbox_buddy")
+
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "120"))
 IMPORTANCE_THRESHOLD = float(os.getenv("REPLY_IMPORTANCE_THRESHOLD", "0.6"))
 REPLY_THRESHOLD = float(os.getenv("REPLY_NEEDED_THRESHOLD", "0.6"))
+logger.info(
+    "Backend initialized (poll_interval=%s, importance_threshold=%.2f, reply_threshold=%.2f)",
+    POLL_INTERVAL,
+    IMPORTANCE_THRESHOLD,
+    REPLY_THRESHOLD,
+)
 
 app = FastAPI()
 
@@ -50,33 +65,41 @@ def health():
 
 @app.get("/auth/start")
 def auth_start(request: Request):
+    logger.debug("Auth start requested")
     try:
         ensure_auth()
+        logger.info("Auth already completed; skipping OAuth flow")
         return {"already_authenticated": True}
     except AuthRequired:
         callback_url = str(request.url_for("auth_callback"))
         try:
             auth_url = start_auth_flow(callback_url)
         except FileNotFoundError as exc:
+            logger.error("Auth flow failed: %s", exc)
             raise HTTPException(status_code=400, detail=str(exc))
+        logger.info("Starting OAuth flow; redirecting user to Google auth")
         return {"auth_url": auth_url}
 
 
 @app.get("/auth/callback", response_class=HTMLResponse)
 def auth_callback(state: str = "", code: str = "", error: str = ""):
     if error:
+        logger.error("Auth callback returned error: %s", error)
         return HTMLResponse(
             f"<html><body><h3>Authentication failed: {error}</h3></body></html>",
             status_code=400,
         )
     if not state or not code:
+        logger.error("Auth callback missing state or code")
         raise HTTPException(status_code=400, detail="Missing state or code")
 
     try:
         complete_auth_flow(state, code)
     except AuthRequired as exc:
+        logger.error("Auth completion failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc))
 
+    logger.info("OAuth flow completed successfully")
     body = """
     <html>
         <body>
@@ -91,6 +114,7 @@ def auth_callback(state: str = "", code: str = "", error: str = ""):
 def get_emails(limit: int = 50):
     db = SessionLocal()
     try:
+        logger.debug("Fetching %d most recent emails", limit)
         q = db.query(Email).order_by(Email.internal_date.desc()).limit(limit).all()
         return [{
             "msg_id": e.msg_id,
@@ -117,11 +141,16 @@ class AskBody(BaseModel):
 def ask(body: AskBody):
     db = SessionLocal()
     try:
+        logger.info("Received ask request (limit=%d)", body.limit)
         emails = db.query(Email).order_by(Email.internal_date.desc()).limit(body.limit).all()
         ctx = ""
         for e in emails:
             ctx += f"From: {e.sender}\nSubject: {e.subject}\nBody: {e.body[:2000]}\n---\n"
-        answer = answer_question(ctx, body.question)
+        try:
+            answer = answer_question(ctx, body.question)
+        except Exception as exc:
+            logger.exception("Failed to answer question")
+            raise HTTPException(status_code=500, detail="Failed to answer question") from exc
         return {"answer": answer}
     finally:
         db.close()
@@ -131,25 +160,42 @@ async def events():
     async def event_stream():
         queue = asyncio.Queue()
         subscribers.add(queue)
+        logger.debug("SSE subscriber added (total=%d)", len(subscribers))
         try:
             while True:
                 data = await queue.get()
                 yield f"data: {json.dumps(data)}\n\n"
         finally:
             subscribers.remove(queue)
+            logger.debug("SSE subscriber removed (total=%d)", len(subscribers))
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 async def notify_all(data: Dict):
+    logger.debug(
+        "Dispatching event '%s' to %d subscribers",
+        data.get("type", "unknown"),
+        len(subscribers),
+    )
     for q in list(subscribers):
         await q.put(data)
 
 async def poller():
+    logger.info("Poller starting with interval %s seconds", POLL_INTERVAL)
     await asyncio.sleep(3)
     while True:
         try:
-            service = get_gmail()
+            try:
+                service = get_gmail()
+            except AuthRequired:
+                logger.warning("Gmail authentication required; poller will retry later")
+                await notify_all({"type": "auth_required"})
+                await asyncio.sleep(POLL_INTERVAL)
+                continue
+            logger.debug("Polling Gmail for unread messages")
             msgs = list_recent_unread(service, max_results=25)
+            logger.debug("Fetched %d messages from Gmail", len(msgs) if msgs else 0)
             if not msgs:
+                logger.debug("No new messages found; sleeping")
                 await asyncio.sleep(POLL_INTERVAL)
                 continue
 
@@ -159,6 +205,7 @@ async def poller():
                 for m in msgs:
                     msg_id = m["id"]
                     if msg_id in known_ids:
+                        logger.debug("Skipping known message %s", msg_id)
                         continue
                     full = get_message(service, msg_id)
                     payload = extract_payload(full)
@@ -182,9 +229,19 @@ async def poller():
                     )
                     db.add(e)
                     db.commit()
+                    logger.info(
+                        "Stored email msg_id=%s subject=%s importance=%.2f reply_needed=%.2f",
+                        e.msg_id,
+                        e.subject,
+                        e.importance_score,
+                        e.reply_needed_score,
+                    )
 
                     # Send SSE event
                     if e.is_important or e.reply_needed:
+                        logger.info(
+                            "Notifying subscribers about important email msg_id=%s", e.msg_id
+                        )
                         await notify_all({
                             "type": "important_email",
                             "msg_id": e.msg_id,
@@ -198,9 +255,11 @@ async def poller():
             finally:
                 db.close()
         except Exception as ex:
+            logger.exception("Poller encountered an error")
             await notify_all({"type": "error", "message": str(ex)})
         await asyncio.sleep(POLL_INTERVAL)
 
 @app.on_event("startup")
 async def on_start():
+    logger.info("Starting background poller task")
     asyncio.create_task(poller())
