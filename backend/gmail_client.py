@@ -1,46 +1,119 @@
 import os
 import base64
-from typing import List, Dict, Optional
+import time
+from typing import Dict, Optional, Tuple
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+
+
+class AuthRequired(Exception):
+    """Raised when Gmail access requires user interaction."""
+
+
+# state -> (flow, created_at)
+_pending_flows: Dict[str, Tuple[InstalledAppFlow, float]] = {}
+_FLOW_TTL_SECONDS = 15 * 60
+
 
 def _get_paths():
     token_path = os.getenv("GOOGLE_TOKEN_PATH", "/app/token.json")
     creds_path = os.getenv("GOOGLE_CREDENTIALS_PATH", "/app/credentials.json")
     return token_path, creds_path
 
+
 def ensure_auth():
     token_path, creds_path = _get_paths()
+
+    if not os.path.exists(creds_path):
+        raise AuthRequired("Gmail credentials.json not found")
+
     creds = None
     if os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            # Let google-auth refresh lazily when used by client
+
+    if not creds:
+        raise AuthRequired("Gmail authentication required")
+
+    if creds.valid:
+        return creds
+
+    if creds.expired and creds.refresh_token:
+        # google-api-python-client will refresh lazily when invoked.
+        return creds
+
+    raise AuthRequired("Stored Gmail credentials are invalid; please re-authenticate")
+
+
+def _cleanup_flows(now: Optional[float] = None):
+    if not _pending_flows:
+        return
+    now = now or time.time()
+    expired = [state for state, (_, created) in _pending_flows.items() if now - created > _FLOW_TTL_SECONDS]
+    for state in expired:
+        _pending_flows.pop(state, None)
+
+
+def start_auth_flow(callback_url: str) -> str:
+    token_path, creds_path = _get_paths()
+    if not os.path.exists(creds_path):
+        raise FileNotFoundError("Gmail credentials.json not found")
+
+    flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
+    flow.redirect_uri = callback_url
+    auth_url, state = flow.authorization_url(
+        prompt="consent",
+        access_type="offline",
+        include_granted_scopes="true",
+    )
+
+    _cleanup_flows()
+    _pending_flows[state] = (flow, time.time())
+
+    # Remove stale token to avoid confusion while a new flow is in progress.
+    if os.path.exists(token_path):
+        try:
+            os.remove(token_path)
+        except OSError:
             pass
-        else:
-            # Launch local server flow
-            flow = InstalledAppFlow.from_client_secrets_file(creds_path, SCOPES)
-            creds = flow.run_local_server(host="0.0.0.0", port=8081, prompt="consent")
-        with open(token_path, "w") as token:
-            token.write(creds.to_json())
+
+    return auth_url
+
+
+def complete_auth_flow(state: str, code: str):
+    token_path, _ = _get_paths()
+
+    entry = _pending_flows.pop(state, None)
+    if not entry:
+        raise AuthRequired("Invalid or expired authorization state")
+
+    flow, _ = entry
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+
+    with open(token_path, "w") as token:
+        token.write(creds.to_json())
+
     return creds
+
 
 def get_gmail():
     creds = ensure_auth()
     service = build("gmail", "v1", credentials=creds, cache_discovery=False)
     return service
 
+
 def list_recent_unread(service, max_results=25, q="is:unread newer_than:7d"):
     res = service.users().messages().list(userId="me", q=q, maxResults=max_results).execute()
     return res.get("messages", [])
 
+
 def get_message(service, msg_id: str) -> Dict:
     return service.users().messages().get(userId="me", id=msg_id, format="full").execute()
+
 
 def extract_payload(message: Dict) -> Dict[str, Optional[str]]:
     headers = {h["name"].lower(): h["value"] for h in message.get("payload", {}).get("headers", [])}
@@ -49,6 +122,7 @@ def extract_payload(message: Dict) -> Dict[str, Optional[str]]:
     snippet = message.get("snippet", "")
 
     body = ""
+
     def walk(parts):
         nonlocal body
         for p in parts:
