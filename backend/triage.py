@@ -9,7 +9,7 @@ import google.generativeai as genai
 from google.generativeai import types
 
 logger = logging.getLogger(__name__)
-MODEL_NAME = os.getenv("GOOGLE_GENAI_MODEL", "gemini-1.5-pro")
+MODEL_NAME = os.getenv("GOOGLE_GENAI_MODEL", "gemini-2.5-flash")
 
 CLASSIFIER_SYSTEM_INSTRUCTION = (
     "You are an email triage classifier for a busy professional. "

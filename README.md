@@ -4,7 +4,7 @@ A small local app that watches your Gmail, classifies new emails with Google Gem
 
 ## What you get
 
-- FastAPI backend that polls Gmail and classifies with Gemini 1.5 Pro (override via `GOOGLE_GENAI_MODEL`)
+- FastAPI backend that polls Gmail and classifies with Gemini 2.5 Flash (override via `GOOGLE_GENAI_MODEL`)
 - SQLite storage of parsed emails
 - SSE stream that triggers browser notifications for important emails or replies needed
 - Simple web UI with a chat style Q&A box
