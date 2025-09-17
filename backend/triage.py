@@ -1,4 +1,5 @@
 import json
+import ast
 import logging
 import os
 import re
@@ -25,6 +26,12 @@ QA_SYSTEM_INSTRUCTION = (
     "You are a helpful inbox analyst. Answer questions using only the provided email context. If the context does not contain the answer, say that you are not sure."
 )
 
+ASSISTANT_SYSTEM_INSTRUCTION = (
+    "You are Inbox Buddy, a proactive personal email assistant. "
+    "When an email almost certainly needs a personal reply, craft a concise notification for the user, highlight the key points they should address, and draft a short, friendly reply they can send. "
+    "Always reply in JSON with the keys notification (string under 200 characters addressing the user as 'you'), summary (array of up to three short bullet strings), and reply_draft (string containing a brief email reply written in first person as the user)."
+)
+
 CLASSIFY_GENERATION_CONFIG = types.GenerationConfig(
     temperature=0.1,
     top_p=0.9,
@@ -38,6 +45,14 @@ QA_GENERATION_CONFIG = types.GenerationConfig(
     top_p=0.9,
     top_k=32,
     max_output_tokens=512,
+)
+
+ASSISTANT_GENERATION_CONFIG = types.GenerationConfig(
+    temperature=0.6,
+    top_p=0.9,
+    top_k=40,
+    max_output_tokens=640,
+    response_mime_type="application/json",
 )
 
 try:
@@ -79,6 +94,16 @@ def get_qa_model():
     return genai.GenerativeModel(
         model_name=MODEL_NAME,
         system_instruction=QA_SYSTEM_INSTRUCTION,
+    )
+
+
+@lru_cache(maxsize=1)
+def get_assistant_model():
+    _configure_client()
+    logger.info("Initialized assistant model name=%s", MODEL_NAME)
+    return genai.GenerativeModel(
+        model_name=MODEL_NAME,
+        system_instruction=ASSISTANT_SYSTEM_INSTRUCTION,
     )
 
 
@@ -223,6 +248,69 @@ def _response_to_text(response: Any) -> str:
     return "\n".join(pieces).strip()
 
 
+def _strip_code_fence(text: str) -> str:
+    if not text:
+        return ""
+    match = re.match(r"^\s*```(?:json)?\s*([\s\S]*?)\s*```\s*$", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return text.strip()
+
+
+def _find_json_block(text: str) -> str | None:
+    depth = 0
+    start = None
+    for idx, char in enumerate(text):
+        if char == "{":
+            if depth == 0:
+                start = idx
+            depth += 1
+        elif char == "}":
+            if depth:
+                depth -= 1
+                if depth == 0 and start is not None:
+                    return text[start : idx + 1]
+    return None
+
+
+def _safe_load_json(text: str) -> dict:
+    if not text:
+        raise ValueError("Empty response from model")
+
+    cleaned = _strip_code_fence(text)
+    cleaned = cleaned.replace("“", '"').replace("”", '"').replace("’", "'")
+
+    candidates: list[str] = []
+    block = _find_json_block(cleaned)
+    if block:
+        candidates.append(block)
+    candidates.append(cleaned)
+
+    for candidate in candidates:
+        snippet = candidate.strip()
+        if not snippet:
+            continue
+        try:
+            return json.loads(snippet)
+        except json.JSONDecodeError:
+            try:
+                return json.loads(snippet.replace("'", '"'))
+            except json.JSONDecodeError:
+                continue
+
+    pythonish = cleaned
+    pythonish = re.sub(r"\btrue\b", "True", pythonish, flags=re.IGNORECASE)
+    pythonish = re.sub(r"\bfalse\b", "False", pythonish, flags=re.IGNORECASE)
+    pythonish = re.sub(r"\bnull\b", "None", pythonish, flags=re.IGNORECASE)
+    try:
+        obj = ast.literal_eval(pythonish)
+    except (ValueError, SyntaxError) as exc:  # pragma: no cover - defensive
+        raise ValueError("Unable to coerce model output to JSON") from exc
+    if isinstance(obj, dict):
+        return obj
+    raise ValueError("Model output was not a JSON object")
+
+
 def _default_classification(email_text: str, rationale: str) -> dict:
     marketing = _looks_like_marketing(email_text) or _has_list_unsubscribe(email_text)
     reply_cue = _has_reply_cue(email_text)
@@ -262,8 +350,7 @@ def classify(email_text: str) -> dict:
         text = _response_to_text(response)
 
     try:
-        match = re.search(r"\{[\s\S]*\}", text)
-        data = json.loads(match.group(0) if match else text)
+        data = _safe_load_json(text)
     except Exception:
         logger.exception("Failed to parse model response as JSON")
         rationale = text[:500] or "Model response was empty."
@@ -347,3 +434,75 @@ def answer_question(context_text: str, question: str) -> str:
     answer = (response.text or "").strip()
     logger.debug("Answer produced (chars=%d)", len(answer))
     return answer
+
+
+def craft_assistant_message(payload: dict) -> dict:
+    sender = payload.get("sender", "Someone")
+    subject = payload.get("subject", "(no subject)")
+    body = payload.get("body", "")
+    snippet = payload.get("snippet", "")
+
+    email_text = f"From: {sender}\nSubject: {subject}\n\n{body}".strip()
+    model = get_assistant_model()
+    prompt = (
+        "A new email probably needs a personal reply. "
+        "Summarize it for the user and draft a short reply they can send. "
+        "Respond with JSON matching the schema described in the system instruction.\n"
+        "Email content is between triple backticks.\n"
+        "```\n"
+        f"{email_text}\n"
+        "```"
+    )
+
+    logger.debug(
+        "Generating assistant guidance for sender='%s' subject='%s'", sender, subject
+    )
+
+    response = model.generate_content(
+        [{"role": "user", "parts": [prompt]}],
+        generation_config=ASSISTANT_GENERATION_CONFIG,
+    )
+
+    try:
+        text = (response.text or "").strip()
+    except ValueError:  # pragma: no cover - SDK defensive path
+        logger.debug("response.text accessor unavailable for assistant output")
+        text = ""
+    if not text:
+        text = _response_to_text(response)
+
+    try:
+        data = _safe_load_json(text)
+    except Exception:
+        logger.exception("Failed to parse assistant guidance JSON")
+        fallback_summary = snippet or body[:180]
+        summary_list = [fallback_summary.strip()] if fallback_summary.strip() else []
+        return {
+            "notification": f"You have an actionable email from {sender} about '{subject}'.",
+            "summary": summary_list,
+            "reply_draft": "",
+        }
+
+    notification = str(data.get("notification", "")).strip()
+    if not notification:
+        notification = f"You have an actionable email from {sender}."
+    notification = notification[:280]
+
+    summary = data.get("summary", [])
+    if isinstance(summary, str):
+        summary_items = [
+            item.strip(" -*•\t")
+            for item in summary.splitlines()
+            if item.strip()
+        ]
+    else:
+        summary_items = [str(item).strip() for item in summary if str(item).strip()]
+    summary_items = summary_items[:3]
+
+    reply_draft = str(data.get("reply_draft", "")).strip()
+
+    return {
+        "notification": notification,
+        "summary": summary_items,
+        "reply_draft": reply_draft,
+    }

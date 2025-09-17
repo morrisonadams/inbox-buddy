@@ -22,7 +22,7 @@ from gmail_client import (
     extract_payload,
     start_auth_flow,
 )
-from triage import classify, answer_question
+from triage import classify, answer_question, craft_assistant_message
 
 load_dotenv()
 init_db()
@@ -123,21 +123,32 @@ def get_emails(limit: int = 50, actionable_only: bool = True):
         if actionable_only:
             query = query.filter(Email.is_important.is_(True))
         q = query.limit(limit).all()
-        return [{
-            "msg_id": e.msg_id,
-            "thread_id": e.thread_id,
-            "subject": e.subject,
-            "sender": e.sender,
-            "snippet": e.snippet,
-            "body": e.body[:2000],
-            "internal_date": e.internal_date,
-            "is_unread": e.is_unread,
-            "is_important": e.is_important,
-            "reply_needed": e.reply_needed,
-            "importance_score": e.importance_score,
-            "reply_needed_score": e.reply_needed_score,
-            "actionable": e.is_important,
-        } for e in q]
+        results = []
+        for e in q:
+            summary_lines = [
+                line.strip()
+                for line in (e.assistant_summary or "").splitlines()
+                if line.strip()
+            ]
+            results.append({
+                "msg_id": e.msg_id,
+                "thread_id": e.thread_id,
+                "subject": e.subject,
+                "sender": e.sender,
+                "snippet": e.snippet,
+                "body": e.body[:2000],
+                "internal_date": e.internal_date,
+                "is_unread": e.is_unread,
+                "is_important": e.is_important,
+                "reply_needed": e.reply_needed,
+                "importance_score": e.importance_score,
+                "reply_needed_score": e.reply_needed_score,
+                "actionable": e.is_important,
+                "assistant_message": e.assistant_message,
+                "assistant_summary": summary_lines,
+                "assistant_reply": e.assistant_reply,
+            })
+        return results
     finally:
         db.close()
 
@@ -246,6 +257,31 @@ async def poller():
                     if actionable_flag and importance_score < reply_needed_score:
                         importance_score = reply_needed_score
 
+                    assistant_message = ""
+                    assistant_summary_text = ""
+                    assistant_reply = ""
+                    assistant_payload = None
+                    if actionable_flag:
+                        try:
+                            assistant_payload = craft_assistant_message(payload)
+                        except Exception:
+                            logger.exception(
+                                "Failed to craft assistant guidance for msg_id=%s", msg_id
+                            )
+                            assistant_payload = {
+                                "notification": "",
+                                "summary": [],
+                                "reply_draft": "",
+                            }
+                        assistant_message = str(assistant_payload.get("notification", "")).strip()
+                        assistant_summary_items = [
+                            str(item).strip()
+                            for item in assistant_payload.get("summary", [])
+                            if str(item).strip()
+                        ]
+                        assistant_summary_text = "\n".join(assistant_summary_items)
+                        assistant_reply = str(assistant_payload.get("reply_draft", "")).strip()
+
                     e = Email(
                         msg_id=msg_id,
                         thread_id=full.get("threadId"),
@@ -259,6 +295,9 @@ async def poller():
                         reply_needed=reply_flag,
                         importance_score=importance_score,
                         reply_needed_score=reply_needed_score,
+                        assistant_message=assistant_message,
+                        assistant_summary=assistant_summary_text,
+                        assistant_reply=assistant_reply,
                     )
                     db.add(e)
                     db.commit()
@@ -276,6 +315,7 @@ async def poller():
                         logger.info(
                             "Notifying subscribers about actionable email msg_id=%s", e.msg_id
                         )
+                        assistant_summary = assistant_payload.get("summary", []) if assistant_payload else []
                         await notify_all({
                             "type": "important_email",
                             "msg_id": e.msg_id,
@@ -286,6 +326,9 @@ async def poller():
                             "reply_needed_score": e.reply_needed_score,
                             "snippet": e.snippet,
                             "actionable": actionable_flag,
+                            "assistant_message": assistant_message,
+                            "assistant_summary": assistant_summary,
+                            "assistant_reply": assistant_reply,
                         })
             finally:
                 db.close()
