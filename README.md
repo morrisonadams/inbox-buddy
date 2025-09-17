@@ -4,7 +4,7 @@ A small local app that watches your Gmail, classifies new emails with Google Gem
 
 ## What you get
 
-- FastAPI backend that polls Gmail and classifies with Gemini
+- FastAPI backend that polls Gmail and classifies with Gemini 1.5 Pro (override via `GOOGLE_GENAI_MODEL`)
 - SQLite storage of parsed emails
 - SSE stream that triggers browser notifications for important emails or replies needed
 - Simple web UI with a chat style Q&A box
@@ -88,7 +88,7 @@ Then open http://localhost:8000/health to test, and point the frontend at `VITE_
 - This is polling based. Default poll interval is 120 seconds. Adjust `POLL_INTERVAL` in `.env`.
 - First run of OAuth uses a local HTTP callback on port 8081 inside the API container. Your browser will open. If you hit issues, do the OAuth step once outside Docker and copy `token.json` into `backend/`.
 - Only read only Gmail scope is used. No send or modify actions are performed.
-- The classifier is simple. Tweak thresholds in `.env` or refine the prompt in `triage.py`.
+- The classifier is tuned to only flag reply-needed when someone is clearly waiting on you. Tweak thresholds in `.env` or refine the prompt in `triage.py`.
 - Data stays local in `backend/db.sqlite3`.
 - If you prefer Vertex AI instead of AI Studio keys you can swap the Gemini client code.
 
