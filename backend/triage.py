@@ -3,7 +3,7 @@ import logging
 import os
 import re
 from functools import lru_cache
-from typing import Any
+from typing import Any, Iterable
 
 import google.generativeai as genai
 from google.generativeai import types
@@ -39,6 +39,11 @@ QA_GENERATION_CONFIG = types.GenerationConfig(
     top_k=32,
     max_output_tokens=512,
 )
+
+try:
+    SAFETY_FINISH_REASON = types.FinishReason.SAFETY
+except AttributeError:  # pragma: no cover - fallback for SDKs without enum
+    SAFETY_FINISH_REASON = "SAFETY"
 
 
 @lru_cache(maxsize=1)
@@ -95,19 +100,143 @@ def _coerce_bool(value: Any) -> bool:
     return False
 
 
+def _extract_sender_line(email_text: str) -> str:
+    for line in email_text.splitlines():
+        if line.lower().startswith("from:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
 def _looks_like_marketing(email_text: str) -> bool:
     lowered = email_text.lower()
     marketing_cues = (
         "unsubscribe",
         "view this email in your browser",
         "view in browser",
+        "special offer",
+        "limited time",
+        "sale",
+        "deal",
+        "% off",
+        "discount",
+        "coupon",
+        "promo code",
+        "book now",
+        "rent a car",
+        "loyalty",
+        "rewards",
+        "exclusive offer",
+        "upgrade now",
+        "act now",
     )
-    return any(cue in lowered for cue in marketing_cues)
+    if any(cue in lowered for cue in marketing_cues):
+        return True
+
+    sender = _extract_sender_line(email_text).lower()
+    sender_cues = (
+        "newsletter",
+        "no-reply",
+        "noreply",
+        "updates",
+        "offers",
+        "promotions",
+        "marketing",
+        "sales",
+        "mailer",
+        "notification",
+        "@info",
+        "@news",
+    )
+    return any(cue in sender for cue in sender_cues)
 
 
 def _is_no_reply_sender(email_text: str) -> bool:
     lowered = email_text.lower()
     return any(tag in lowered for tag in ("no-reply", "noreply", "do-not-reply", "donotreply"))
+
+
+def _has_list_unsubscribe(email_text: str) -> bool:
+    return "list-unsubscribe" in email_text.lower()
+
+
+def _has_reply_cue(email_text: str) -> bool:
+    lowered = email_text.lower()
+    reply_phrases = (
+        "please respond",
+        "please reply",
+        "please confirm",
+        "let me know",
+        "could you",
+        "can you",
+        "would you",
+        "do you",
+        "are you",
+        "rsvp",
+        "need your response",
+        "awaiting your response",
+        "pls advise",
+        "please advise",
+        "what time",
+        "next steps",
+        "follow up",
+        "schedule",
+        "call me",
+        "share the",
+        "send me",
+    )
+    if any(phrase in lowered for phrase in reply_phrases):
+        return True
+    return "?" in email_text
+
+
+def _iter_candidate_text(candidate: Any) -> Iterable[str]:
+    content = getattr(candidate, "content", None)
+    if not content:
+        return []
+    parts = getattr(content, "parts", None) or []
+    texts = []
+    for part in parts:
+        text = getattr(part, "text", None)
+        if text:
+            texts.append(text)
+        elif isinstance(part, dict):
+            value = part.get("text")
+            if value:
+                texts.append(value)
+    return texts
+
+
+def _response_to_text(response: Any) -> str:
+    pieces: list[str] = []
+    for candidate in getattr(response, "candidates", []) or []:
+        if getattr(candidate, "finish_reason", None) == SAFETY_FINISH_REASON:
+            continue
+        texts = list(_iter_candidate_text(candidate))
+        if texts:
+            pieces.extend(texts)
+            break
+    if not pieces:
+        prompt_feedback = getattr(response, "prompt_feedback", None)
+        block_reason = getattr(prompt_feedback, "block_reason", None) if prompt_feedback else None
+        if block_reason:
+            logger.warning("Model response blocked by safety systems: %s", block_reason)
+    return "\n".join(pieces).strip()
+
+
+def _default_classification(email_text: str, rationale: str) -> dict:
+    marketing = _looks_like_marketing(email_text) or _has_list_unsubscribe(email_text)
+    reply_cue = _has_reply_cue(email_text)
+    importance = reply_cue and not marketing
+    reply_needed = importance
+    score = 0.75 if importance else 0.1
+    return {
+        "importance": importance,
+        "reply_needed": reply_needed,
+        "importance_score": score,
+        "reply_needed_score": score,
+        "rationale": rationale,
+        "actionable": importance,
+    }
 
 
 def classify(email_text: str) -> dict:
@@ -124,20 +253,21 @@ def classify(email_text: str) -> dict:
         [{"role": "user", "parts": [prompt]}],
         generation_config=CLASSIFY_GENERATION_CONFIG,
     )
-    text = (response.text or "").strip()
+    try:
+        text = (response.text or "").strip()
+    except ValueError:
+        logger.debug("response.text accessor unavailable; attempting manual extraction")
+        text = ""
+    if not text:
+        text = _response_to_text(response)
 
     try:
         match = re.search(r"\{[\s\S]*\}", text)
         data = json.loads(match.group(0) if match else text)
     except Exception:
         logger.exception("Failed to parse model response as JSON")
-        data = {
-            "importance": False,
-            "reply_needed": False,
-            "importance_score": 0.0,
-            "reply_needed_score": 0.0,
-            "rationale": text[:500],
-        }
+        rationale = text[:500] or "Model response was empty."
+        data = _default_classification(email_text, rationale)
 
     importance_score = _clamp_score(data.get("importance_score"))
     reply_needed_score = _clamp_score(data.get("reply_needed_score"))
@@ -150,25 +280,47 @@ def classify(email_text: str) -> dict:
     if reply_needed_score < 0.45:
         reply_needed = False
 
-    if reply_needed and _looks_like_marketing(email_text):
+    marketing = _looks_like_marketing(email_text) or _has_list_unsubscribe(email_text)
+    if reply_needed and marketing:
         logger.debug("Marketing cues detected; overriding reply_needed flag")
         reply_needed = False
         reply_needed_score = min(reply_needed_score, 0.3)
+
+    if marketing:
+        logger.debug("Marketing cues detected; lowering importance flag")
+        importance = False
+        importance_score = min(importance_score, 0.3)
 
     if reply_needed and _is_no_reply_sender(email_text) and reply_needed_score < 0.95:
         logger.debug("No-reply sender detected; overriding reply_needed flag")
         reply_needed = False
         reply_needed_score = min(reply_needed_score, 0.3)
 
+    if reply_needed and not _has_reply_cue(email_text):
+        logger.debug("No reply cues detected; lowering reply_needed flag")
+        reply_needed = False
+        reply_needed_score = min(reply_needed_score, 0.35)
+
+    actionable = importance and reply_needed
+
+    if not actionable and reply_needed_score >= 0.75 and not marketing:
+        logger.debug("High reply score detected; promoting importance for actionable flag")
+        importance = True
+        importance_score = max(importance_score, reply_needed_score)
+        actionable = True
+
     data["importance"] = importance
     data["reply_needed"] = reply_needed
     data["importance_score"] = importance_score
     data["reply_needed_score"] = reply_needed_score
+    data["actionable"] = actionable
+    data["rationale"] = str(data.get("rationale", ""))[:500]
 
     logger.debug(
-        "Classification result importance=%.2f reply_needed=%.2f",
+        "Classification result importance=%.2f reply_needed=%.2f actionable=%s",
         data["importance_score"],
         data["reply_needed_score"],
+        actionable,
     )
     return data
 

@@ -16,9 +16,16 @@ async function jpost(path, body){
 }
 
 async function loadEmails(){
-  const emails = await jget("/emails?limit=50");
+  const emails = await jget("/emails?limit=50&actionable_only=true");
   const el = document.getElementById("emails");
   el.innerHTML = "";
+  if(emails.length === 0){
+    const empty = document.createElement("div");
+    empty.className = "empty";
+    empty.textContent = "You're all caught up. No replies are needed right now.";
+    el.appendChild(empty);
+    return;
+  }
   for(const e of emails){
     const card = document.createElement("div");
     card.className = "card";
@@ -27,7 +34,7 @@ async function loadEmails(){
       <div>From: ${e.sender}</div>
       <div><i>${new Date(parseInt(e.internal_date || 0)).toLocaleString()}</i></div>
       <div>${e.snippet}</div>
-      <div>Important: ${e.is_important} | Reply needed: ${e.reply_needed}</div>
+      <div>Reply needed score: ${(e.reply_needed_score ?? 0).toFixed(2)} | Importance score: ${(e.importance_score ?? 0).toFixed(2)}</div>
     `;
     el.appendChild(card);
   }
@@ -52,9 +59,9 @@ function connectSSE(){
   ev.onmessage = (m)=>{
     try{
       const data = JSON.parse(m.data);
-      if(data.type === "important_email"){
+      if(data.type === "important_email" && data.actionable){
         if(Notification.permission === "granted"){
-          new Notification("Important email", {
+          new Notification("Reply needed", {
             body: data.subject + " — " + data.sender
           });
         }
