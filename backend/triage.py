@@ -195,7 +195,6 @@ def _has_reply_cue(email_text: str) -> bool:
         "can you",
         "would you",
         "do you",
-        "are you",
         "rsvp",
         "need your response",
         "awaiting your response",
@@ -208,10 +207,80 @@ def _has_reply_cue(email_text: str) -> bool:
         "call me",
         "share the",
         "send me",
+        "any update",
+        "any updates",
+        "status update",
+        "status on",
+        "your thoughts",
+        "any thoughts",
+        "share your thoughts",
+        "feedback?",
+        "are you able",
+        "are you available",
+        "are you coming",
+        "are you joining",
+        "are you free",
+        "should we",
+        "can we",
+        "could we",
+        "would we",
+        "are we",
+        "shall we",
+        "let us know",
     )
     if any(phrase in lowered for phrase in reply_phrases):
         return True
-    return "?" in email_text
+
+    question_lines = [line for line in email_text.splitlines() if "?" in line]
+    if not question_lines:
+        return False
+
+    pronoun_patterns = (
+        r"\byou\b",
+        r"\byour\b",
+        r"\bwe\b",
+        r"\bi\b",
+    )
+    followup_keywords = (
+        "available",
+        "availability",
+        "able",
+        "schedule",
+        "time",
+        "date",
+        "deadline",
+        "status",
+        "update",
+        "updates",
+        "follow up",
+        "follow-up",
+        "next step",
+        "next steps",
+        "confirm",
+        "confirmation",
+        "details",
+        "question for",
+        "feedback",
+        "thoughts",
+        "join",
+        "joining",
+        "attend",
+        "attendance",
+        "free",
+        "coming",
+    )
+
+    for line in question_lines:
+        lowered_line = line.lower()
+        if any(phrase in lowered_line for phrase in reply_phrases):
+            return True
+        if any(re.search(pattern, lowered_line) for pattern in pronoun_patterns):
+            if any(keyword in lowered_line for keyword in followup_keywords):
+                return True
+            if re.search(r"\b(what|when|where|who|how|which|why)\b", lowered_line):
+                return True
+
+    return False
 
 
 def _iter_candidate_text(candidate: Any) -> Iterable[str]:
@@ -257,6 +326,63 @@ def _strip_code_fence(text: str) -> str:
     return text.strip()
 
 
+def _escape_unescaped_newlines(snippet: str) -> str:
+    """Replace bare newlines inside quoted strings with escaped newlines."""
+
+    if not snippet:
+        return ""
+
+    result: list[str] = []
+    in_string = False
+    quote_char = ""
+    escape = False
+    pending_cr_in_string = False
+
+    for ch in snippet:
+        if pending_cr_in_string:
+            if ch == "\n" and in_string:
+                pending_cr_in_string = False
+                continue
+            pending_cr_in_string = False
+
+        if escape:
+            result.append(ch)
+            escape = False
+            continue
+
+        if ch == "\\":
+            result.append(ch)
+            escape = True
+            continue
+
+        if in_string:
+            if ch == quote_char:
+                in_string = False
+                quote_char = ""
+                result.append(ch)
+            elif ch == "\r":
+                result.append("\\n")
+                pending_cr_in_string = True
+            elif ch == "\n":
+                result.append("\\n")
+            else:
+                result.append(ch)
+            continue
+
+        if ch in ('"', "'"):
+            in_string = True
+            quote_char = ch
+
+        if ch == "\r":
+            # Allow CRLF line endings without duplicating carriage returns.
+            pending_cr_in_string = False
+            continue
+
+        result.append(ch)
+
+    return "".join(result)
+
+
 def _find_json_block(text: str) -> str | None:
     depth = 0
     start = None
@@ -279,6 +405,7 @@ def _safe_load_json(text: str) -> dict:
 
     cleaned = _strip_code_fence(text)
     cleaned = cleaned.replace("“", '"').replace("”", '"').replace("’", "'")
+    cleaned = _escape_unescaped_newlines(cleaned)
 
     candidates: list[str] = []
     block = _find_json_block(cleaned)
@@ -287,18 +414,19 @@ def _safe_load_json(text: str) -> dict:
     candidates.append(cleaned)
 
     for candidate in candidates:
-        snippet = candidate.strip()
+        snippet = _escape_unescaped_newlines(candidate.strip())
         if not snippet:
             continue
         try:
             return json.loads(snippet)
         except json.JSONDecodeError:
             try:
-                return json.loads(snippet.replace("'", '"'))
+                normalized = _escape_unescaped_newlines(snippet.replace("'", '"'))
+                return json.loads(normalized)
             except json.JSONDecodeError:
                 continue
 
-    pythonish = cleaned
+    pythonish = _escape_unescaped_newlines(cleaned)
     pythonish = re.sub(r"\btrue\b", "True", pythonish, flags=re.IGNORECASE)
     pythonish = re.sub(r"\bfalse\b", "False", pythonish, flags=re.IGNORECASE)
     pythonish = re.sub(r"\bnull\b", "None", pythonish, flags=re.IGNORECASE)
@@ -359,12 +487,12 @@ def classify(email_text: str) -> dict:
     importance_score = _clamp_score(data.get("importance_score"))
     reply_needed_score = _clamp_score(data.get("reply_needed_score"))
 
-    importance = _coerce_bool(data.get("importance")) or importance_score >= 0.6
-    reply_needed = _coerce_bool(data.get("reply_needed")) or reply_needed_score >= 0.6
+    importance = _coerce_bool(data.get("importance")) or importance_score >= 0.7
+    reply_needed = _coerce_bool(data.get("reply_needed")) or reply_needed_score >= 0.7
 
-    if importance_score < 0.45:
+    if importance_score < 0.5:
         importance = False
-    if reply_needed_score < 0.45:
+    if reply_needed_score < 0.5:
         reply_needed = False
 
     marketing = _looks_like_marketing(email_text) or _has_list_unsubscribe(email_text)
@@ -390,7 +518,7 @@ def classify(email_text: str) -> dict:
 
     actionable = importance and reply_needed
 
-    if not actionable and reply_needed_score >= 0.75 and not marketing:
+    if not actionable and reply_needed_score >= 0.85 and not marketing:
         logger.debug("High reply score detected; promoting importance for actionable flag")
         importance = True
         importance_score = max(importance_score, reply_needed_score)
