@@ -6,13 +6,216 @@
   <title>Inbox Buddy</title>
   <link rel="manifest" href="/manifest.json">
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 0; padding: 16px; }
-    .row { display: flex; gap: 12px; margin-bottom: 12px; }
-    .card { border: 1px solid #ddd; border-radius: 12px; padding: 12px; margin-bottom: 10px; }
-    .empty { padding: 24px; text-align: center; color: #666; border: 1px dashed #ccc; border-radius: 12px; }
-    .btn { padding: 8px 12px; border-radius: 8px; border: 1px solid #ccc; background: #f8f8f8; cursor: pointer; }
-    .btn:active { transform: translateY(1px); }
-    #answer { white-space: pre-wrap; }
+    :root {
+      color-scheme: light;
+    }
+    body {
+      font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      margin: 0;
+      padding: 24px;
+      background: #f5f7fb;
+      color: #0f172a;
+      min-height: 100vh;
+    }
+    h1 {
+      margin-top: 0;
+      margin-bottom: 16px;
+      font-size: 28px;
+    }
+    .row {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      padding: 9px 14px;
+      border-radius: 10px;
+      border: 1px solid #cbd5f5;
+      background: #fff;
+      cursor: pointer;
+      font-weight: 500;
+      transition: transform 0.1s ease, box-shadow 0.1s ease;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+    }
+    .btn.primary {
+      background: #6366f1;
+      color: #fff;
+      border-color: #4f46e5;
+      box-shadow: 0 1px 3px rgba(79, 70, 229, 0.3);
+    }
+    .btn:active {
+      transform: translateY(1px);
+    }
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .layout {
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+      margin-top: 24px;
+    }
+    .chat-panel {
+      flex: 1 1 380px;
+      max-width: 720px;
+      background: #fff;
+      border: 1px solid #e0e7ff;
+      border-radius: 18px;
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+      padding: 22px;
+      display: flex;
+      flex-direction: column;
+      min-height: 520px;
+    }
+    .chat-panel h2 {
+      margin: 0 0 12px;
+    }
+    .chat-log {
+      flex: 1;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      padding-right: 4px;
+    }
+    .bubble {
+      max-width: 85%;
+      padding: 12px 16px;
+      border-radius: 16px;
+      line-height: 1.45;
+      font-size: 15px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+      background: #fff;
+      border: 1px solid transparent;
+    }
+    .bubble-text {
+      white-space: pre-wrap;
+    }
+    .bubble.assistant {
+      background: #eef2ff;
+      border-color: #c7d2fe;
+      align-self: flex-start;
+      border-top-left-radius: 4px;
+    }
+    .bubble.user {
+      background: #dcfce7;
+      border-color: #bbf7d0;
+      align-self: flex-end;
+      border-top-right-radius: 4px;
+    }
+    .bubble.error {
+      background: #fee2e2;
+      border-color: #fca5a5;
+    }
+    .bubble-title {
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .bubble-meta {
+      font-size: 12px;
+      color: #475569;
+      margin-bottom: 6px;
+    }
+    .bubble-summary {
+      margin: 10px 0 0 18px;
+      color: #1e293b;
+    }
+    .bubble-summary li {
+      margin-bottom: 4px;
+    }
+    .bubble-reply {
+      background: #ffffff;
+      border: 1px solid #c7d2fe;
+      border-radius: 12px;
+      padding: 12px;
+      margin-top: 10px;
+      white-space: pre-wrap;
+      font-family: "IBM Plex Mono", "Courier New", monospace;
+      font-size: 13px;
+    }
+    .chat-input {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 16px;
+    }
+    .chat-input textarea {
+      resize: vertical;
+      min-height: 84px;
+      border-radius: 12px;
+      border: 1px solid #cbd5f5;
+      padding: 10px 12px;
+      font-family: inherit;
+      font-size: 15px;
+      line-height: 1.45;
+    }
+    .chat-input textarea:focus {
+      outline: 2px solid #6366f1;
+      border-color: #6366f1;
+    }
+    .list-panel {
+      flex: 1 1 300px;
+      max-width: 520px;
+    }
+    .email-card {
+      border: 1px solid #e2e8f0;
+      background: #fff;
+      border-radius: 16px;
+      padding: 16px;
+      margin-bottom: 12px;
+      box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+    }
+    .email-card .email-date {
+      font-size: 12px;
+      color: #64748b;
+      margin: 6px 0;
+    }
+    .email-card .email-scores {
+      font-size: 12px;
+      color: #475569;
+      margin-top: 10px;
+      font-weight: 500;
+    }
+    .email-card .assistant-note {
+      background: #eef2ff;
+      border-radius: 12px;
+      padding: 10px 12px;
+      margin-top: 10px;
+    }
+    .email-card .assistant-summary {
+      margin: 10px 0 0 18px;
+    }
+    .email-card .assistant-reply {
+      background: #f8fafc;
+      border-radius: 12px;
+      border: 1px solid #cbd5e1;
+      padding: 12px;
+      white-space: pre-wrap;
+      font-size: 13px;
+      margin-top: 10px;
+    }
+    .empty {
+      padding: 24px;
+      text-align: center;
+      color: #475569;
+      border: 1px dashed #cbd5f5;
+      border-radius: 12px;
+      background: #f8fafc;
+    }
+    @media (max-width: 900px) {
+      body {
+        padding: 20px 16px 32px;
+      }
+      .layout {
+        flex-direction: column;
+      }
+      .chat-panel,
+      .list-panel {
+        max-width: none;
+      }
+    }
   </style>
 </head>
 <body>
@@ -23,16 +226,21 @@
     <button id="refresh" class="btn">Refresh Emails</button>
   </div>
 
-  <div class="row">
-    <input id="question" placeholder="Ask about your inbox..." style="flex:1; padding:8px; border-radius:8px; border:1px solid #ccc;">
-    <button id="ask" class="btn">Ask</button>
+  <div class="layout">
+    <section class="chat-panel">
+      <h2>Inbox Buddy Assistant</h2>
+      <div id="chatLog" class="chat-log"></div>
+      <div class="chat-input">
+        <textarea id="chatInput" placeholder="Ask Inbox Buddy about your inbox or request help drafting a reply..."></textarea>
+        <button id="sendChat" class="btn primary">Send</button>
+      </div>
+    </section>
+
+    <section class="list-panel">
+      <h2>Needs your reply</h2>
+      <div id="emails"></div>
+    </section>
   </div>
-
-  <h3>Answer</h3>
-  <div id="answer" class="card"></div>
-
-  <h3>Needs your reply</h3>
-  <div id="emails"></div>
 
   <script type="module" src="/main.js"></script>
 </body>
