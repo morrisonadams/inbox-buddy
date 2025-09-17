@@ -111,11 +111,18 @@ def auth_callback(state: str = "", code: str = "", error: str = ""):
     return HTMLResponse(body)
 
 @app.get("/emails")
-def get_emails(limit: int = 50):
+def get_emails(limit: int = 50, actionable_only: bool = True):
     db = SessionLocal()
     try:
-        logger.debug("Fetching %d most recent emails", limit)
-        q = db.query(Email).order_by(Email.internal_date.desc()).limit(limit).all()
+        logger.debug(
+            "Fetching %d emails (actionable_only=%s)",
+            limit,
+            actionable_only,
+        )
+        query = db.query(Email).order_by(Email.internal_date.desc())
+        if actionable_only:
+            query = query.filter(Email.is_important.is_(True))
+        q = query.limit(limit).all()
         return [{
             "msg_id": e.msg_id,
             "thread_id": e.thread_id,
@@ -129,6 +136,7 @@ def get_emails(limit: int = 50):
             "reply_needed": e.reply_needed,
             "importance_score": e.importance_score,
             "reply_needed_score": e.reply_needed_score,
+            "actionable": e.is_important,
         } for e in q]
     finally:
         db.close()
@@ -213,6 +221,31 @@ async def poller():
                     email_text = f"From: {payload['sender']}\nSubject: {payload['subject']}\n\n{payload['body']}"
                     result = classify(email_text)
 
+                    try:
+                        importance_score = float(result.get("importance_score", 0))
+                    except (TypeError, ValueError):
+                        importance_score = 0.0
+                    try:
+                        reply_needed_score = float(result.get("reply_needed_score", 0))
+                    except (TypeError, ValueError):
+                        reply_needed_score = 0.0
+
+                    importance_score = max(0.0, min(1.0, importance_score))
+                    reply_needed_score = max(0.0, min(1.0, reply_needed_score))
+
+                    importance_flag = bool(result.get("importance")) or importance_score >= IMPORTANCE_THRESHOLD
+                    reply_flag = bool(result.get("reply_needed")) or reply_needed_score >= REPLY_THRESHOLD
+
+                    if importance_score < 0.45:
+                        importance_flag = False
+                    if reply_needed_score < 0.45:
+                        reply_flag = False
+
+                    actionable_flag = bool(result.get("actionable")) or (importance_flag and reply_flag)
+
+                    if actionable_flag and importance_score < reply_needed_score:
+                        importance_score = reply_needed_score
+
                     e = Email(
                         msg_id=msg_id,
                         thread_id=full.get("threadId"),
@@ -222,25 +255,26 @@ async def poller():
                         body=payload["body"],
                         internal_date=internal_date,
                         is_unread=True,
-                        is_important=bool(result.get("importance")) or float(result.get("importance_score", 0)) >= IMPORTANCE_THRESHOLD,
-                        reply_needed=bool(result.get("reply_needed")) or float(result.get("reply_needed_score", 0)) >= REPLY_THRESHOLD,
-                        importance_score=float(result.get("importance_score", 0)),
-                        reply_needed_score=float(result.get("reply_needed_score", 0)),
+                        is_important=actionable_flag,
+                        reply_needed=reply_flag,
+                        importance_score=importance_score,
+                        reply_needed_score=reply_needed_score,
                     )
                     db.add(e)
                     db.commit()
                     logger.info(
-                        "Stored email msg_id=%s subject=%s importance=%.2f reply_needed=%.2f",
+                        "Stored email msg_id=%s subject=%s importance=%.2f reply_needed=%.2f actionable=%s",
                         e.msg_id,
                         e.subject,
                         e.importance_score,
                         e.reply_needed_score,
+                        actionable_flag,
                     )
 
                     # Send SSE event
-                    if e.is_important or e.reply_needed:
+                    if actionable_flag:
                         logger.info(
-                            "Notifying subscribers about important email msg_id=%s", e.msg_id
+                            "Notifying subscribers about actionable email msg_id=%s", e.msg_id
                         )
                         await notify_all({
                             "type": "important_email",
@@ -251,6 +285,7 @@ async def poller():
                             "importance_score": e.importance_score,
                             "reply_needed_score": e.reply_needed_score,
                             "snippet": e.snippet,
+                            "actionable": actionable_flag,
                         })
             finally:
                 db.close()
