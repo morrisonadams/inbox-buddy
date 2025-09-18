@@ -5,7 +5,13 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import triage
-from triage import _has_reply_cue, _looks_like_marketing, _safe_load_json, classify
+from triage import (
+    _has_reply_cue,
+    _looks_like_marketing,
+    _safe_load_json,
+    answer_question,
+    classify,
+)
 
 
 def test_safe_load_json_handles_multiline_rationale():
@@ -85,3 +91,49 @@ def test_classify_handles_empty_model_response(monkeypatch):
     assert result["importance"] is False
     assert result["reply_needed"] is False
     assert result["rationale"] == "Model response was empty."
+
+
+def test_answer_question_handles_text_accessor_value_error(monkeypatch):
+    class DummyCandidate:
+        finish_reason = None
+
+        class DummyContent:
+            parts = [{"text": "Fallback answer"}]
+
+        content = DummyContent()
+
+    class DummyResponse:
+        candidates = [DummyCandidate()]
+
+        @property
+        def text(self):  # pragma: no cover - accessed indirectly
+            raise ValueError("No quick text available")
+
+    class DummyModel:
+        def generate_content(self, *args, **kwargs):  # pragma: no cover - trivial
+            return DummyResponse()
+
+    monkeypatch.setattr(triage, "get_qa_model", lambda: DummyModel())
+
+    answer = answer_question("Context", "What is up?")
+
+    assert answer == "Fallback answer"
+
+
+def test_answer_question_defaults_when_no_text(monkeypatch):
+    class DummyResponse:
+        candidates: list[object] = []
+
+        @property
+        def text(self):  # pragma: no cover - accessed indirectly
+            raise ValueError("No text available")
+
+    class DummyModel:
+        def generate_content(self, *args, **kwargs):  # pragma: no cover - trivial
+            return DummyResponse()
+
+    monkeypatch.setattr(triage, "get_qa_model", lambda: DummyModel())
+
+    answer = answer_question("Context", "Tell me something")
+
+    assert answer == "I'm not sure."
