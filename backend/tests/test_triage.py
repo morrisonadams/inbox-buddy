@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from triage import _has_reply_cue, _safe_load_json
+from triage import _has_reply_cue, _looks_like_marketing, _safe_load_json
 
 
 def test_safe_load_json_handles_multiline_rationale():
@@ -42,3 +42,21 @@ def test_has_reply_cue_recognizes_direct_request_question():
     request_email = """Subject: Project Update\n\nAre you available for a quick sync tomorrow at 3?"""
 
     assert _has_reply_cue(request_email) is True
+
+
+def test_has_reply_cue_ignores_marketing_would_you_like_question():
+    marketing_email = (
+        "Subject: Upgrade and Save\n\nWould you like to upgrade your plan and save 20% today?"
+    )
+
+    assert _has_reply_cue(marketing_email) is False
+
+
+def test_looks_like_marketing_detects_roundup_subject():
+    email_text = (
+        "From: Deals Newsletter <deals@example.com>\n"
+        "Subject: Weekly Digest: Top Stories and Offers\n\n"
+        "Here are the latest deals you might enjoy."
+    )
+
+    assert _looks_like_marketing(email_text) is True

@@ -132,6 +132,13 @@ def _extract_sender_line(email_text: str) -> str:
     return ""
 
 
+def _extract_subject_line(email_text: str) -> str:
+    for line in email_text.splitlines():
+        if line.lower().startswith("subject:"):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
 def _looks_like_marketing(email_text: str) -> bool:
     lowered = email_text.lower()
     marketing_cues = (
@@ -153,8 +160,26 @@ def _looks_like_marketing(email_text: str) -> bool:
         "exclusive offer",
         "upgrade now",
         "act now",
+        "shop now",
+        "learn more",
+        "manage your preferences",
+        "update your preferences",
+        "manage preferences",
+        "manage subscription",
+        "view this message online",
+        "view online",
+        "privacy policy",
+        "no longer wish to receive",
+        "newsletter",
+        "digest",
+        "webinar",
+        "flash sale",
     )
     if any(cue in lowered for cue in marketing_cues):
+        return True
+
+    subject = _extract_subject_line(email_text)
+    if _is_roundup_subject(subject):
         return True
 
     sender = _extract_sender_line(email_text).lower()
@@ -171,8 +196,44 @@ def _looks_like_marketing(email_text: str) -> bool:
         "notification",
         "@info",
         "@news",
+        "@email.",
+        "@mail.",
+        "@mailer",
+        "@campaign",
+        "@notify",
+        "@marketing",
+        "@promo",
+        "@deals",
+        "@updates.",
+        "@messaging",
+        "@communication",
     )
     return any(cue in sender for cue in sender_cues)
+
+
+def _is_roundup_subject(subject: str) -> bool:
+    if not subject:
+        return False
+    subject_lower = subject.lower()
+    if re.search(r"\b(daily|weekly|monthly|weekend)\s+(digest|newsletter|roundup|summary|update)\b", subject_lower):
+        return True
+    roundup_cues = (
+        "newsletter",
+        "digest",
+        "roundup",
+        "summary",
+        "highlights",
+        "top stories",
+        "top picks",
+        "in case you missed",
+    )
+    if any(cue in subject_lower for cue in roundup_cues):
+        return True
+    if re.search(r"\b\d{1,3}%\s*(off|discount|savings)\b", subject_lower):
+        return True
+    if "flash sale" in subject_lower:
+        return True
+    return False
 
 
 def _is_no_reply_sender(email_text: str) -> bool:
@@ -185,55 +246,72 @@ def _has_list_unsubscribe(email_text: str) -> bool:
 
 
 def _has_reply_cue(email_text: str) -> bool:
+    if _looks_like_marketing(email_text):
+        return False
+
     lowered = email_text.lower()
-    reply_phrases = (
+    explicit_phrases = (
         "please respond",
         "please reply",
         "please confirm",
+        "please let me know",
         "let me know",
-        "could you",
-        "can you",
-        "would you",
-        "do you",
-        "rsvp",
+        "do let me know",
+        "kindly let me know",
         "need your response",
         "awaiting your response",
+        "awaiting your reply",
+        "awaiting your confirmation",
         "pls advise",
         "please advise",
-        "what time",
-        "next steps",
-        "follow up",
-        "schedule",
-        "call me",
-        "share the",
-        "send me",
+        "rsvp",
+        "let us know",
+        "looking forward to your response",
+        "looking forward to hearing from you",
+        "appreciate your quick response",
+        "appreciate your response",
         "any update",
         "any updates",
         "status update",
         "status on",
-        "your thoughts",
-        "any thoughts",
-        "share your thoughts",
-        "feedback?",
-        "are you able",
-        "are you available",
-        "are you coming",
-        "are you joining",
-        "are you free",
-        "should we",
-        "can we",
-        "could we",
-        "would we",
-        "are we",
-        "shall we",
-        "let us know",
+        "follow up on",
+        "following up on",
+        "follow up with",
+        "follow-up on",
     )
-    if any(phrase in lowered for phrase in reply_phrases):
+    if any(phrase in lowered for phrase in explicit_phrases):
         return True
 
     question_lines = [line for line in email_text.splitlines() if "?" in line]
     if not question_lines:
         return False
+
+    marketing_rhetorical = (
+        "can you believe",
+        "would you like",
+        "would you love",
+        "can you handle",
+        "are you ready",
+        "ready for",
+        "will you join us",
+        "would you join us",
+        "can we tempt you",
+        "can we interest you",
+        "could we interest you",
+        "are you excited",
+    )
+    marketing_keywords = (
+        "deal",
+        "deals",
+        "sale",
+        "discount",
+        "offer",
+        "offers",
+        "promo",
+        "promotion",
+        "upgrade",
+        "flash sale",
+    )
 
     pronoun_patterns = (
         r"\byou\b",
@@ -246,6 +324,7 @@ def _has_reply_cue(email_text: str) -> bool:
         "availability",
         "able",
         "schedule",
+        "calendar",
         "time",
         "date",
         "deadline",
@@ -268,12 +347,80 @@ def _has_reply_cue(email_text: str) -> bool:
         "attendance",
         "free",
         "coming",
+        "call",
+        "call me",
+        "chat",
+        "discuss",
+        "discussion",
+        "meet",
+        "meeting",
+        "sync",
+        "touch base",
+        "connect",
+        "share",
+        "send",
+        "send me",
+        "provide",
+        "deliver",
+        "deliverable",
+        "document",
+        "documents",
+        "doc",
+        "deck",
+        "slide",
+        "slides",
+        "report",
+        "notes",
+        "plan",
+        "proposal",
+        "quote",
+        "invoice",
+        "contract",
+        "signature",
+        "sign",
+        "approve",
+        "approval",
+        "review",
+        "take a look",
+        "look over",
+        "input",
+        "decision",
+        "answer",
+        "help",
+        "support",
+        "issue",
+        "problem",
+        "reschedule",
+        "make it",
+    )
+    scheduling_phrases = (
+        "can we meet",
+        "could we meet",
+        "shall we meet",
+        "should we meet",
+        "can we talk",
+        "could we talk",
+        "should we talk",
+        "can we discuss",
+        "could we discuss",
+        "should we discuss",
+        "can we connect",
+        "could we connect",
+        "should we connect",
     )
 
     for line in question_lines:
-        lowered_line = line.lower()
-        if any(phrase in lowered_line for phrase in reply_phrases):
+        lowered_line = line.lower().strip()
+        if any(phrase in lowered_line for phrase in marketing_rhetorical):
+            continue
+        if any(phrase in lowered_line for phrase in explicit_phrases):
             return True
+        if any(phrase in lowered_line for phrase in scheduling_phrases):
+            return True
+        if any(keyword in lowered_line for keyword in marketing_keywords) and not any(
+            keyword in lowered_line for keyword in ("schedule", "meeting", "contract", "invoice", "quote")
+        ):
+            continue
         if any(re.search(pattern, lowered_line) for pattern in pronoun_patterns):
             if any(keyword in lowered_line for keyword in followup_keywords):
                 return True
