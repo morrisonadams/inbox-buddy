@@ -90,95 +90,111 @@ function normalizeSummary(value) {
   return [];
 }
 
+let loadingEmails = false;
+let emailsReloadPending = false;
+
 async function loadEmails() {
-  const el = document.getElementById("emails");
-  el.innerHTML = "";
-  let emails = [];
+  if (loadingEmails) {
+    emailsReloadPending = true;
+    return;
+  }
+  loadingEmails = true;
   try {
-    emails = await jget("/emails?limit=50&actionable_only=true");
-  } catch (err) {
-    addMessage(
-      "assistant",
-      "I couldn't load your actionable emails. Please try refreshing.",
-      { error: true }
-    );
-    return;
-  }
-
-  if (emails.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "empty";
-    empty.textContent = "You're all caught up. No replies are needed right now.";
-    el.appendChild(empty);
-    return;
-  }
-
-  for (const e of emails) {
-    const card = document.createElement("div");
-    card.className = "email-card";
-
-    const subjectRow = document.createElement("div");
-    const subjectStrong = document.createElement("strong");
-    subjectStrong.textContent = e.subject || "(no subject)";
-    subjectRow.appendChild(subjectStrong);
-    card.appendChild(subjectRow);
-
-    const senderRow = document.createElement("div");
-    senderRow.textContent = `From: ${e.sender}`;
-    card.appendChild(senderRow);
-
-    const statusRow = document.createElement("div");
-    statusRow.className = "email-status " + (e.is_unread ? "unread" : "read");
-    statusRow.textContent = e.is_unread ? "Unread" : "Read";
-    card.appendChild(statusRow);
-
-    if (e.internal_date) {
-      const dateRow = document.createElement("div");
-      dateRow.className = "email-date";
-      dateRow.textContent = new Date(Number(e.internal_date)).toLocaleString();
-      card.appendChild(dateRow);
+    const el = document.getElementById("emails");
+    el.innerHTML = "";
+    let emails = [];
+    try {
+      emails = await jget("/emails?limit=50&actionable_only=true");
+    } catch (err) {
+      addMessage(
+        "assistant",
+        "I couldn't load your actionable emails. Please try refreshing.",
+        { error: true }
+      );
+      return;
     }
 
-    if (e.snippet) {
-      const snippetRow = document.createElement("div");
-      snippetRow.textContent = e.snippet;
-      card.appendChild(snippetRow);
+    if (emails.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = "You're all caught up. No replies are needed right now.";
+      el.appendChild(empty);
+      return;
     }
 
-    const scoresRow = document.createElement("div");
-    scoresRow.className = "email-scores";
-    const replyScore = Number(e.reply_needed_score ?? 0).toFixed(2);
-    const importanceScore = Number(e.importance_score ?? 0).toFixed(2);
-    scoresRow.textContent = `Reply score ${replyScore} · Importance ${importanceScore}`;
-    card.appendChild(scoresRow);
+    for (const e of emails) {
+      const card = document.createElement("div");
+      card.className = "email-card";
 
-    if (e.assistant_message) {
-      const note = document.createElement("div");
-      note.className = "assistant-note";
-      note.textContent = e.assistant_message;
-      card.appendChild(note);
-    }
+      const subjectRow = document.createElement("div");
+      const subjectStrong = document.createElement("strong");
+      subjectStrong.textContent = e.subject || "(no subject)";
+      subjectRow.appendChild(subjectStrong);
+      card.appendChild(subjectRow);
 
-    const summary = normalizeSummary(e.assistant_summary);
-    if (summary.length) {
-      const list = document.createElement("ul");
-      list.className = "assistant-summary";
-      for (const item of summary) {
-        const li = document.createElement("li");
-        li.textContent = item;
-        list.appendChild(li);
+      const senderRow = document.createElement("div");
+      senderRow.textContent = `From: ${e.sender}`;
+      card.appendChild(senderRow);
+
+      const statusRow = document.createElement("div");
+      statusRow.className = "email-status " + (e.is_unread ? "unread" : "read");
+      statusRow.textContent = e.is_unread ? "Unread" : "Read";
+      card.appendChild(statusRow);
+
+      if (e.internal_date) {
+        const dateRow = document.createElement("div");
+        dateRow.className = "email-date";
+        dateRow.textContent = new Date(Number(e.internal_date)).toLocaleString();
+        card.appendChild(dateRow);
       }
-      card.appendChild(list);
-    }
 
-    if (e.assistant_reply) {
-      const pre = document.createElement("pre");
-      pre.className = "assistant-reply";
-      pre.textContent = e.assistant_reply;
-      card.appendChild(pre);
-    }
+      if (e.snippet) {
+        const snippetRow = document.createElement("div");
+        snippetRow.textContent = e.snippet;
+        card.appendChild(snippetRow);
+      }
 
-    el.appendChild(card);
+      const scoresRow = document.createElement("div");
+      scoresRow.className = "email-scores";
+      const replyScore = Number(e.reply_needed_score ?? 0).toFixed(2);
+      const importanceScore = Number(e.importance_score ?? 0).toFixed(2);
+      scoresRow.textContent = `Reply score ${replyScore} · Importance ${importanceScore}`;
+      card.appendChild(scoresRow);
+
+      if (e.assistant_message) {
+        const note = document.createElement("div");
+        note.className = "assistant-note";
+        note.textContent = e.assistant_message;
+        card.appendChild(note);
+      }
+
+      const summary = normalizeSummary(e.assistant_summary);
+      if (summary.length) {
+        const list = document.createElement("ul");
+        list.className = "assistant-summary";
+        for (const item of summary) {
+          const li = document.createElement("li");
+          li.textContent = item;
+          list.appendChild(li);
+        }
+        card.appendChild(list);
+      }
+
+      if (e.assistant_reply) {
+        const pre = document.createElement("pre");
+        pre.className = "assistant-reply";
+        pre.textContent = e.assistant_reply;
+        card.appendChild(pre);
+      }
+
+      el.appendChild(card);
+    }
+  } finally {
+    loadingEmails = false;
+    if (emailsReloadPending) {
+      emailsReloadPending = false;
+      loadEmails();
+    }
   }
 }
 
