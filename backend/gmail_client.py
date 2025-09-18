@@ -155,11 +155,16 @@ def get_gmail():
     return service
 
 
-DEFAULT_UNREAD_QUERY = "is:unread newer_than:7d -category:promotions"
+DEFAULT_RECENT_QUERY = "newer_than:7d -category:promotions"
 
 
-def list_recent_unread(service, max_results=25, q: Optional[str] = None):
-    query = q or DEFAULT_UNREAD_QUERY
+def list_recent_messages(
+    service,
+    max_results: int = 25,
+    q: Optional[str] = None,
+) -> list[dict]:
+    """Return recent Gmail messages, including ones already read."""
+    query = q or DEFAULT_RECENT_QUERY
     res = (
         service.users()
         .messages()
