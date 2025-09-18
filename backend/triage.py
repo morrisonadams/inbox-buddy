@@ -722,7 +722,15 @@ def answer_question(context_text: str, question: str) -> str:
         [{"role": "user", "parts": [prompt]}],
         generation_config=QA_GENERATION_CONFIG,
     )
-    answer = (response.text or "").strip()
+    try:
+        answer = (response.text or "").strip()
+    except ValueError:  # pragma: no cover - SDK defensive path
+        logger.debug("response.text accessor unavailable for QA output")
+        answer = ""
+    if not answer:
+        answer = _response_to_text(response)
+    if not answer:
+        answer = "I'm not sure."
     logger.debug("Answer produced (chars=%d)", len(answer))
     return answer
 
