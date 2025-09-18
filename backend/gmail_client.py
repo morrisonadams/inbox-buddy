@@ -106,8 +106,17 @@ def get_gmail():
     return service
 
 
-def list_recent_unread(service, max_results=25, q="is:unread newer_than:7d"):
-    res = service.users().messages().list(userId="me", q=q, maxResults=max_results).execute()
+DEFAULT_UNREAD_QUERY = "is:unread newer_than:7d -category:promotions"
+
+
+def list_recent_unread(service, max_results=25, q: Optional[str] = None):
+    query = q or DEFAULT_UNREAD_QUERY
+    res = (
+        service.users()
+        .messages()
+        .list(userId="me", q=query, maxResults=max_results)
+        .execute()
+    )
     return res.get("messages", [])
 
 

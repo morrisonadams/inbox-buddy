@@ -1,3 +1,4 @@
+import json
 import sys
 import textwrap
 from pathlib import Path
@@ -5,7 +6,14 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import triage
-from triage import _has_reply_cue, _looks_like_marketing, _safe_load_json, classify
+from triage import (
+    _has_reply_cue,
+    _looks_like_marketing,
+    _mentions_user_name,
+    _refresh_owner_context,
+    _safe_load_json,
+    classify,
+)
 
 
 def test_safe_load_json_handles_multiline_rationale():
@@ -85,3 +93,69 @@ def test_classify_handles_empty_model_response(monkeypatch):
     assert result["importance"] is False
     assert result["reply_needed"] is False
     assert result["rationale"] == "Model response was empty."
+
+
+def test_mentions_user_name_detects_alias(monkeypatch):
+    monkeypatch.setenv("INBOX_OWNER_NAME", "Alex Johnson")
+    monkeypatch.setenv("INBOX_OWNER_ALIASES", "AJ,Alex J.")
+    _refresh_owner_context()
+    try:
+        personal_email = (
+            "From: Teammate <teammate@example.com>\n"
+            "Subject: Need a quick review\n\n"
+            "Hi Alex, could you look over the deck today?"
+        )
+        assert _mentions_user_name(personal_email) is True
+
+        generic_email = (
+            "From: Updates <updates@example.com>\n"
+            "Subject: Weekly Digest\n\n"
+            "Hello team, here is the weekly summary."
+        )
+        assert _mentions_user_name(generic_email) is False
+    finally:
+        monkeypatch.delenv("INBOX_OWNER_NAME", raising=False)
+        monkeypatch.delenv("INBOX_OWNER_ALIASES", raising=False)
+        _refresh_owner_context()
+
+
+def test_classify_promotes_reply_when_model_signals_and_name_present(monkeypatch):
+    monkeypatch.setenv("INBOX_OWNER_NAME", "Alex")
+    _refresh_owner_context()
+
+    class DummyResponse:
+        def __init__(self, text: str):
+            self.text = text
+            self.candidates: list[dict[str, str]] = []
+
+    class DummyModel:
+        def generate_content(self, *args, **kwargs):  # pragma: no cover - simple stub
+            payload = json.dumps(
+                {
+                    "importance": False,
+                    "importance_score": 0.42,
+                    "reply_needed": True,
+                    "reply_needed_score": 0.52,
+                    "rationale": "Sender asked Alex for a deliverable.",
+                }
+            )
+            return DummyResponse(payload)
+
+    monkeypatch.setattr(triage, "get_classifier_model", lambda: DummyModel())
+
+    email_text = (
+        "From: Erin <erin@example.com>\n"
+        "Subject: Status update\n\n"
+        "Hi Alex, can you send the signed contract today?"
+    )
+
+    try:
+        result = classify(email_text)
+    finally:
+        monkeypatch.delenv("INBOX_OWNER_NAME", raising=False)
+        _refresh_owner_context()
+
+    assert result["reply_needed"] is True
+    assert result["importance"] is True
+    assert result["reply_needed_score"] >= 0.7
+    assert result["importance_score"] >= 0.6

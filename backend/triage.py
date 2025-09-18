@@ -12,15 +12,90 @@ from google.generativeai import types
 logger = logging.getLogger(__name__)
 MODEL_NAME = os.getenv("GOOGLE_GENAI_MODEL", "gemini-2.5-flash")
 
-CLASSIFIER_SYSTEM_INSTRUCTION = (
-    "You are an email triage classifier for a busy professional. "
-    "Analyze each email and return structured JSON describing its importance and whether the sender expects the user to respond. "
-    "The JSON must contain the keys importance (boolean), importance_score (float 0-1), reply_needed (boolean), reply_needed_score (float 0-1), and rationale (string). "
-    "Importance captures urgency or business impact that warrants quick attention. "
-    "Reply_needed is true only when the sender clearly awaits a personal response from the user—for example direct questions, requests for confirmation, scheduling coordination, or deliverables. "
-    "Treat newsletters, promotions, marketing blasts, receipts, and automated notifications as reply_needed=false unless they explicitly demand that the user reply. "
-    "When the expectation is ambiguous, err on reply_needed=false and explain why in the rationale."
-)
+
+@lru_cache(maxsize=1)
+def _get_owner_context() -> dict[str, Any]:
+    name = os.getenv("INBOX_OWNER_NAME", "").strip()
+    aliases_env = os.getenv("INBOX_OWNER_ALIASES", "")
+    aliases = [alias.strip() for alias in aliases_env.split(",") if alias.strip()]
+
+    display_names: list[str] = []
+    if name:
+        display_names.append(name)
+    display_names.extend(alias for alias in aliases if alias)
+
+    phrase_patterns: list[re.Pattern[str]] = []
+    token_terms: set[str] = set()
+
+    for entry in display_names:
+        lowered = entry.lower().strip()
+        if not lowered:
+            continue
+        parts = [p for p in re.split(r"[^a-z0-9@]+", lowered) if p]
+        if len(parts) > 1:
+            phrase_patterns.append(
+                re.compile(r"\b" + r"\s+".join(re.escape(part) for part in parts) + r"\b")
+            )
+        if parts:
+            token_terms.update(parts)
+        else:
+            token_terms.add(lowered)
+
+    token_patterns = [re.compile(rf"\b{re.escape(term)}\b") for term in sorted(token_terms)]
+
+    if display_names:
+        if len(display_names) == 1:
+            mention_text = display_names[0]
+            instruction = (
+                " Prioritize situations where the sender directly addresses "
+                f"{mention_text} by name as evidence that they expect a response."
+            )
+            prompt_hint = (
+                "The inbox owner goes by {mention_text}. Treat direct mentions of this name as a strong "
+                "signal that the sender wants their personal reply."
+            ).format(mention_text=mention_text)
+        else:
+            mention_text = ", ".join(display_names)
+            instruction = (
+                " Treat direct references to these names as strong signals a personal reply is required: "
+                f"{mention_text}."
+            )
+            prompt_hint = (
+                "The inbox owner responds to the following names: {names}. Treat mentions of any of them "
+                "as a strong signal the sender expects their personal reply."
+            ).format(names=mention_text)
+    else:
+        instruction = ""
+        prompt_hint = ""
+
+    return {
+        "name": name,
+        "aliases": aliases,
+        "display_names": display_names,
+        "phrase_patterns": phrase_patterns,
+        "token_patterns": token_patterns,
+        "instruction": instruction,
+        "prompt_hint": prompt_hint,
+    }
+
+
+def _build_classifier_system_instruction() -> str:
+    base_instruction = (
+        "You are an email triage classifier for a busy professional. "
+        "Analyze each email and return structured JSON describing its importance and whether the sender expects the user to respond. "
+        "The JSON must contain the keys importance (boolean), importance_score (float 0-1), reply_needed (boolean), reply_needed_score (float 0-1), and rationale (string). "
+        "Importance captures urgency or business impact that warrants quick attention. "
+        "Reply_needed is true only when the sender clearly awaits a personal response from the user—for example direct questions, requests for confirmation, scheduling coordination, or deliverables. "
+        "Treat newsletters, promotions, marketing blasts, receipts, and automated notifications as reply_needed=false unless they explicitly demand that the user reply. "
+        "Base your judgement on the sender's intent and context rather than isolated keywords, and explain any uncertainty in the rationale."
+    )
+    owner_instruction = _get_owner_context()["instruction"]
+    if owner_instruction:
+        base_instruction += owner_instruction
+    return base_instruction
+
+
+CLASSIFIER_SYSTEM_INSTRUCTION = _build_classifier_system_instruction()
 
 QA_SYSTEM_INSTRUCTION = (
     "You are a helpful inbox analyst. Answer questions using only the provided email context. If the context does not contain the answer, say that you are not sure."
@@ -105,6 +180,15 @@ def get_assistant_model():
         model_name=MODEL_NAME,
         system_instruction=ASSISTANT_SYSTEM_INSTRUCTION,
     )
+
+
+def _refresh_owner_context():
+    _get_owner_context.cache_clear()
+    global CLASSIFIER_SYSTEM_INSTRUCTION
+    CLASSIFIER_SYSTEM_INSTRUCTION = _build_classifier_system_instruction()
+    cache_clear = getattr(get_classifier_model, "cache_clear", None)
+    if callable(cache_clear):
+        cache_clear()
 
 
 def _clamp_score(value: Any) -> float:
@@ -209,6 +293,21 @@ def _looks_like_marketing(email_text: str) -> bool:
         "@communication",
     )
     return any(cue in sender for cue in sender_cues)
+
+
+def _mentions_user_name(email_text: str) -> bool:
+    context = _get_owner_context()
+    if not context["phrase_patterns"] and not context["token_patterns"]:
+        return False
+
+    lowered = email_text.lower()
+    for pattern in context["phrase_patterns"]:
+        if pattern.search(lowered):
+            return True
+    for pattern in context["token_patterns"]:
+        if pattern.search(lowered):
+            return True
+    return False
 
 
 def _is_roundup_subject(subject: str) -> bool:
@@ -589,9 +688,18 @@ def _safe_load_json(text: str) -> dict:
 def _default_classification(email_text: str, rationale: str) -> dict:
     marketing = _looks_like_marketing(email_text) or _has_list_unsubscribe(email_text)
     reply_cue = _has_reply_cue(email_text)
+    name_mentioned = _mentions_user_name(email_text)
+
     importance = reply_cue and not marketing
     reply_needed = importance
-    score = 0.75 if importance else 0.1
+    score = 0.75 if reply_cue and not marketing else 0.1
+
+    if name_mentioned and not marketing:
+        importance = True
+        score = max(score, 0.55 if reply_cue else 0.35)
+        if reply_cue:
+            reply_needed = True
+            score = max(score, 0.75)
     return {
         "importance": importance,
         "reply_needed": reply_needed,
@@ -604,6 +712,7 @@ def _default_classification(email_text: str, rationale: str) -> dict:
 
 def classify(email_text: str) -> dict:
     model = get_classifier_model()
+    owner_context = _get_owner_context()
     prompt = (
         "Classify the following email. Provide the JSON object requested in the system instructions.\n"
         "Email content is enclosed between triple backticks.\n"
@@ -611,6 +720,9 @@ def classify(email_text: str) -> dict:
         f"{email_text.strip()}\n"
         "```"
     )
+    prompt_hint = owner_context.get("prompt_hint", "")
+    if prompt_hint:
+        prompt = f"{prompt_hint.strip()}\n\n{prompt}"
     logger.debug("Submitting classification prompt (chars=%d)", len(email_text))
     response = model.generate_content(
         [{"role": "user", "parts": [prompt]}],
@@ -650,42 +762,49 @@ def classify(email_text: str) -> dict:
     importance_score = _clamp_score(data.get("importance_score"))
     reply_needed_score = _clamp_score(data.get("reply_needed_score"))
 
-    importance = _coerce_bool(data.get("importance")) or importance_score >= 0.7
-    reply_needed = _coerce_bool(data.get("reply_needed")) or reply_needed_score >= 0.7
+    importance = _coerce_bool(data.get("importance"))
+    reply_needed = _coerce_bool(data.get("reply_needed"))
 
-    if importance_score < 0.5:
-        importance = False
-    if reply_needed_score < 0.5:
-        reply_needed = False
+    if importance:
+        importance_score = max(importance_score, 0.6)
+    elif importance_score >= 0.6:
+        importance = True
+
+    if reply_needed:
+        reply_needed_score = max(reply_needed_score, 0.6)
+    elif reply_needed_score >= 0.6:
+        reply_needed = True
 
     marketing = _looks_like_marketing(email_text) or _has_list_unsubscribe(email_text)
-    if reply_needed and marketing:
-        logger.debug("Marketing cues detected; overriding reply_needed flag")
-        reply_needed = False
-        reply_needed_score = min(reply_needed_score, 0.3)
+    name_mentioned = _mentions_user_name(email_text)
 
     if marketing:
-        logger.debug("Marketing cues detected; lowering importance flag")
+        if reply_needed or importance:
+            logger.debug("Marketing cues detected; overriding model flags")
         importance = False
+        reply_needed = False
         importance_score = min(importance_score, 0.3)
-
-    if reply_needed and _is_no_reply_sender(email_text) and reply_needed_score < 0.95:
-        logger.debug("No-reply sender detected; overriding reply_needed flag")
-        reply_needed = False
         reply_needed_score = min(reply_needed_score, 0.3)
+    else:
+        if reply_needed and _is_no_reply_sender(email_text) and reply_needed_score < 0.95:
+            logger.debug("No-reply sender detected; overriding reply_needed flag")
+            reply_needed = False
+            reply_needed_score = min(reply_needed_score, 0.3)
 
-    if reply_needed and not _has_reply_cue(email_text):
-        logger.debug("No reply cues detected; lowering reply_needed flag")
-        reply_needed = False
-        reply_needed_score = min(reply_needed_score, 0.35)
+        if reply_needed and importance_score < reply_needed_score:
+            importance = True
+            importance_score = max(importance_score, reply_needed_score)
+
+        if name_mentioned and reply_needed_score >= 0.35:
+            if not reply_needed:
+                logger.debug("Name mention detected; promoting reply_needed flag")
+            reply_needed = True
+            reply_needed_score = max(reply_needed_score, 0.7)
+            if importance_score < reply_needed_score:
+                importance = True
+                importance_score = max(importance_score, reply_needed_score * 0.9)
 
     actionable = importance and reply_needed
-
-    if not actionable and reply_needed_score >= 0.85 and not marketing:
-        logger.debug("High reply score detected; promoting importance for actionable flag")
-        importance = True
-        importance_score = max(importance_score, reply_needed_score)
-        actionable = True
 
     data["importance"] = importance
     data["reply_needed"] = reply_needed
