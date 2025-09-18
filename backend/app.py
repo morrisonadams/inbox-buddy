@@ -58,6 +58,17 @@ app.add_middleware(
 
 # SSE subscribers
 subscribers = set()
+poll_lock = asyncio.Lock()
+
+PROMOTION_LABEL_HINTS = (
+    "CATEGORY_PROMOTIONS",
+    "^SMARTLABEL_PROMO",
+    "SMARTLABEL_PROMO",
+    "PROMOTIONS",
+    "PROMOTION",
+    "PROMO",
+    "ADVERT",
+)
 
 @app.get("/health")
 def health():
@@ -174,6 +185,26 @@ def ask(body: AskBody):
     finally:
         db.close()
 
+
+@app.post("/reset")
+async def reset_inbox():
+    logger.info("Reset endpoint invoked; clearing stored emails")
+    db = SessionLocal()
+    try:
+        deleted = db.query(Email).delete()
+        db.commit()
+    finally:
+        db.close()
+
+    await notify_all({"type": "reset", "deleted": deleted})
+
+    try:
+        asyncio.create_task(run_poll_cycle(trigger="manual_reset"))
+    except RuntimeError:  # pragma: no cover - fallback for closed loop
+        logger.warning("Event loop not running; skipping immediate poll trigger")
+
+    return {"deleted": deleted}
+
 @app.get("/events")
 async def events():
     async def event_stream():
@@ -198,125 +229,178 @@ async def notify_all(data: Dict):
     for q in list(subscribers):
         await q.put(data)
 
+
+def _is_promotional_message(message: Dict) -> bool:
+    labels = message.get("labelIds") or []
+    for raw in labels:
+        label = str(raw or "").upper()
+        if any(hint in label for hint in PROMOTION_LABEL_HINTS):
+            return True
+    return False
+
+
 async def poller():
     logger.info("Poller starting with interval %s seconds", POLL_INTERVAL)
     await asyncio.sleep(3)
     while True:
         try:
-            try:
-                service = get_gmail()
-            except AuthRequired:
-                logger.warning("Gmail authentication required; poller will retry later")
-                await notify_all({"type": "auth_required"})
-                await asyncio.sleep(POLL_INTERVAL)
-                continue
-            logger.debug("Polling Gmail for unread messages")
+            await run_poll_cycle()
+        except Exception as ex:  # pragma: no cover - defensive guard
+            logger.exception("Poller encountered an error")
+            await notify_all({"type": "error", "message": str(ex)})
+        await asyncio.sleep(POLL_INTERVAL)
+
+
+async def run_poll_cycle(trigger: str = "scheduled") -> Dict:
+    if poll_lock.locked():
+        logger.debug("Skipping poll cycle because another run is active (trigger=%s)", trigger)
+        return {"status": "busy"}
+
+    async with poll_lock:
+        logger.info("Running inbox poll (trigger=%s)", trigger)
+        try:
+            service = get_gmail()
+        except AuthRequired:
+            logger.warning("Gmail authentication required; poll will retry later")
+            await notify_all({"type": "auth_required"})
+            return {"status": "auth_required"}
+
+        try:
             msgs = list_recent_unread(service, max_results=25)
-            logger.debug("Fetched %d messages from Gmail", len(msgs) if msgs else 0)
-            if not msgs:
-                logger.debug("No new messages found; sleeping")
-                await asyncio.sleep(POLL_INTERVAL)
-                continue
+        except Exception as exc:  # pragma: no cover - network failure guard
+            logger.exception("Failed to list Gmail messages")
+            await notify_all({"type": "error", "message": str(exc)})
+            return {"status": "error", "error": str(exc)}
 
-            db = SessionLocal()
-            try:
-                known_ids = {x[0] for x in db.query(Email.msg_id).all()}
-                for m in msgs:
-                    msg_id = m["id"]
-                    if msg_id in known_ids:
-                        logger.debug("Skipping known message %s", msg_id)
-                        continue
+        logger.debug("Fetched %d messages from Gmail", len(msgs) if msgs else 0)
+        if not msgs:
+            return {"status": "empty"}
+
+        db = SessionLocal()
+        processed = 0
+        try:
+            known_ids = {x[0] for x in db.query(Email.msg_id).all()}
+            for m in msgs:
+                msg_id = m.get("id")
+                if not msg_id:
+                    continue
+                if msg_id in known_ids:
+                    logger.debug("Skipping known message %s", msg_id)
+                    continue
+
+                try:
                     full = get_message(service, msg_id)
-                    payload = extract_payload(full)
-                    internal_date = int(full.get("internalDate", "0"))
-                    email_text = f"From: {payload['sender']}\nSubject: {payload['subject']}\n\n{payload['body']}"
+                except Exception:
+                    logger.exception("Failed to fetch message %s", msg_id)
+                    continue
+
+                if _is_promotional_message(full):
+                    logger.info("Skipping promotional email msg_id=%s", msg_id)
+                    continue
+
+                payload = extract_payload(full)
+                internal_date = int(full.get("internalDate", "0"))
+                email_text = (
+                    f"From: {payload['sender']}\n"
+                    f"Subject: {payload['subject']}\n\n"
+                    f"{payload['body']}"
+                )
+
+                try:
                     result = classify(email_text)
+                except Exception:
+                    logger.exception("Classification failed for msg_id=%s", msg_id)
+                    await notify_all({"type": "error", "message": "Classification failed"})
+                    continue
 
+                try:
+                    importance_score = float(result.get("importance_score", 0))
+                except (TypeError, ValueError):
+                    importance_score = 0.0
+                try:
+                    reply_needed_score = float(result.get("reply_needed_score", 0))
+                except (TypeError, ValueError):
+                    reply_needed_score = 0.0
+
+                importance_score = max(0.0, min(1.0, importance_score))
+                reply_needed_score = max(0.0, min(1.0, reply_needed_score))
+
+                importance_flag = bool(result.get("importance")) or importance_score >= IMPORTANCE_THRESHOLD
+                reply_flag = bool(result.get("reply_needed")) or reply_needed_score >= REPLY_THRESHOLD
+
+                if importance_score < 0.45:
+                    importance_flag = False
+                if reply_needed_score < 0.45:
+                    reply_flag = False
+
+                actionable_flag = bool(result.get("actionable")) or (importance_flag and reply_flag)
+
+                if actionable_flag and importance_score < reply_needed_score:
+                    importance_score = reply_needed_score
+
+                assistant_message = ""
+                assistant_summary_text = ""
+                assistant_reply = ""
+                assistant_payload = None
+                if actionable_flag:
                     try:
-                        importance_score = float(result.get("importance_score", 0))
-                    except (TypeError, ValueError):
-                        importance_score = 0.0
-                    try:
-                        reply_needed_score = float(result.get("reply_needed_score", 0))
-                    except (TypeError, ValueError):
-                        reply_needed_score = 0.0
-
-                    importance_score = max(0.0, min(1.0, importance_score))
-                    reply_needed_score = max(0.0, min(1.0, reply_needed_score))
-
-                    importance_flag = bool(result.get("importance")) or importance_score >= IMPORTANCE_THRESHOLD
-                    reply_flag = bool(result.get("reply_needed")) or reply_needed_score >= REPLY_THRESHOLD
-
-                    if importance_score < 0.45:
-                        importance_flag = False
-                    if reply_needed_score < 0.45:
-                        reply_flag = False
-
-                    actionable_flag = bool(result.get("actionable")) or (importance_flag and reply_flag)
-
-                    if actionable_flag and importance_score < reply_needed_score:
-                        importance_score = reply_needed_score
-
-                    assistant_message = ""
-                    assistant_summary_text = ""
-                    assistant_reply = ""
-                    assistant_payload = None
-                    if actionable_flag:
-                        try:
-                            assistant_payload = craft_assistant_message(payload)
-                        except Exception:
-                            logger.exception(
-                                "Failed to craft assistant guidance for msg_id=%s", msg_id
-                            )
-                            assistant_payload = {
-                                "notification": "",
-                                "summary": [],
-                                "reply_draft": "",
-                            }
-                        assistant_message = str(assistant_payload.get("notification", "")).strip()
-                        assistant_summary_items = [
-                            str(item).strip()
-                            for item in assistant_payload.get("summary", [])
-                            if str(item).strip()
-                        ]
-                        assistant_summary_text = "\n".join(assistant_summary_items)
-                        assistant_reply = str(assistant_payload.get("reply_draft", "")).strip()
-
-                    e = Email(
-                        msg_id=msg_id,
-                        thread_id=full.get("threadId"),
-                        subject=payload["subject"],
-                        sender=payload["sender"],
-                        snippet=payload["snippet"],
-                        body=payload["body"],
-                        internal_date=internal_date,
-                        is_unread=True,
-                        is_important=actionable_flag,
-                        reply_needed=reply_flag,
-                        importance_score=importance_score,
-                        reply_needed_score=reply_needed_score,
-                        assistant_message=assistant_message,
-                        assistant_summary=assistant_summary_text,
-                        assistant_reply=assistant_reply,
-                    )
-                    db.add(e)
-                    db.commit()
-                    logger.info(
-                        "Stored email msg_id=%s subject=%s importance=%.2f reply_needed=%.2f actionable=%s",
-                        e.msg_id,
-                        e.subject,
-                        e.importance_score,
-                        e.reply_needed_score,
-                        actionable_flag,
-                    )
-
-                    # Send SSE event
-                    if actionable_flag:
-                        logger.info(
-                            "Notifying subscribers about actionable email msg_id=%s", e.msg_id
+                        assistant_payload = craft_assistant_message(payload)
+                    except Exception:
+                        logger.exception(
+                            "Failed to craft assistant guidance for msg_id=%s", msg_id
                         )
-                        assistant_summary = assistant_payload.get("summary", []) if assistant_payload else []
-                        await notify_all({
+                        assistant_payload = {
+                            "notification": "",
+                            "summary": [],
+                            "reply_draft": "",
+                        }
+                    assistant_message = str(assistant_payload.get("notification", "")).strip()
+                    assistant_summary_items = [
+                        str(item).strip()
+                        for item in assistant_payload.get("summary", [])
+                        if str(item).strip()
+                    ]
+                    assistant_summary_text = "\n".join(assistant_summary_items)
+                    assistant_reply = str(assistant_payload.get("reply_draft", "")).strip()
+
+                e = Email(
+                    msg_id=msg_id,
+                    thread_id=full.get("threadId"),
+                    subject=payload["subject"],
+                    sender=payload["sender"],
+                    snippet=payload["snippet"],
+                    body=payload["body"],
+                    internal_date=internal_date,
+                    is_unread=True,
+                    is_important=actionable_flag,
+                    reply_needed=reply_flag,
+                    importance_score=importance_score,
+                    reply_needed_score=reply_needed_score,
+                    assistant_message=assistant_message,
+                    assistant_summary=assistant_summary_text,
+                    assistant_reply=assistant_reply,
+                )
+                db.add(e)
+                db.commit()
+                known_ids.add(msg_id)
+                processed += 1
+
+                logger.info(
+                    "Stored email msg_id=%s subject=%s importance=%.2f reply_needed=%.2f actionable=%s",
+                    e.msg_id,
+                    e.subject,
+                    e.importance_score,
+                    e.reply_needed_score,
+                    actionable_flag,
+                )
+
+                if actionable_flag:
+                    logger.info(
+                        "Notifying subscribers about actionable email msg_id=%s", e.msg_id
+                    )
+                    assistant_summary = assistant_payload.get("summary", []) if assistant_payload else []
+                    await notify_all(
+                        {
                             "type": "important_email",
                             "msg_id": e.msg_id,
                             "subject": e.subject,
@@ -329,13 +413,15 @@ async def poller():
                             "assistant_message": assistant_message,
                             "assistant_summary": assistant_summary,
                             "assistant_reply": assistant_reply,
-                        })
-            finally:
-                db.close()
-        except Exception as ex:
-            logger.exception("Poller encountered an error")
-            await notify_all({"type": "error", "message": str(ex)})
-        await asyncio.sleep(POLL_INTERVAL)
+                        }
+                    )
+        finally:
+            db.close()
+
+        logger.info(
+            "Poll cycle finished (trigger=%s processed=%d)", trigger, processed
+        )
+        return {"status": "processed", "processed": processed}
 
 @app.on_event("startup")
 async def on_start():
