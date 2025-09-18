@@ -4,7 +4,8 @@ from pathlib import Path
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
-from triage import _has_reply_cue, _looks_like_marketing, _safe_load_json
+import triage
+from triage import _has_reply_cue, _looks_like_marketing, _safe_load_json, classify
 
 
 def test_safe_load_json_handles_multiline_rationale():
@@ -60,3 +61,27 @@ def test_looks_like_marketing_detects_roundup_subject():
     )
 
     assert _looks_like_marketing(email_text) is True
+
+
+def test_classify_handles_empty_model_response(monkeypatch):
+    class DummyResponse:
+        text = ""
+        candidates: list[dict[str, str]] = []
+
+    class DummyModel:
+        def generate_content(self, *args, **kwargs):  # pragma: no cover - trivial
+            return DummyResponse()
+
+    monkeypatch.setattr(triage, "get_classifier_model", lambda: DummyModel())
+
+    email_text = (
+        "From: Promotions <promo@example.com>\n"
+        "Subject: Weekly Deals\n\n"
+        "Don't miss our sale."
+    )
+
+    result = classify(email_text)
+
+    assert result["importance"] is False
+    assert result["reply_needed"] is False
+    assert result["rationale"] == "Model response was empty."

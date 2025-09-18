@@ -624,11 +624,27 @@ def classify(email_text: str) -> dict:
     if not text:
         text = _response_to_text(response)
 
-    try:
-        data = _safe_load_json(text)
-    except Exception:
-        logger.exception("Failed to parse model response as JSON")
-        rationale = text[:500] or "Model response was empty."
+    data: dict[str, Any] | None = None
+    rationale = ""
+
+    if not text:
+        logger.warning(
+            "Model returned no text for classification; using heuristic fallback"
+        )
+        rationale = "Model response was empty."
+    else:
+        try:
+            data = _safe_load_json(text)
+        except ValueError as exc:
+            logger.warning(
+                "Model JSON parse failed (%s); using heuristic fallback", exc
+            )
+            rationale = text[:500] or str(exc)
+        except Exception:
+            logger.exception("Failed to parse model response as JSON")
+            rationale = text[:500] or "Model response was empty."
+
+    if data is None:
         data = _default_classification(email_text, rationale)
 
     importance_score = _clamp_score(data.get("importance_score"))
