@@ -17,7 +17,7 @@ from gmail_client import (
     complete_auth_flow,
     ensure_auth,
     get_gmail,
-    list_recent_unread,
+    list_recent_messages,
     get_message,
     extract_payload,
     start_auth_flow,
@@ -130,12 +130,24 @@ def get_emails(limit: int = 50, actionable_only: bool = True):
             limit,
             actionable_only,
         )
+        if limit <= 0:
+            return []
+
         query = db.query(Email).order_by(Email.internal_date.desc())
         if actionable_only:
             query = query.filter(Email.is_important.is_(True))
-        q = query.limit(limit).all()
+
+        fetch_limit = max(limit, 1) * 5
+        emails = query.limit(fetch_limit).all()
+
         results = []
-        for e in q:
+        seen_threads = set()
+
+        for e in emails:
+            thread_key = e.thread_id or e.msg_id
+            if thread_key in seen_threads:
+                continue
+            seen_threads.add(thread_key)
             summary_lines = [
                 line.strip()
                 for line in (e.assistant_summary or "").splitlines()
@@ -159,6 +171,8 @@ def get_emails(limit: int = 50, actionable_only: bool = True):
                 "assistant_summary": summary_lines,
                 "assistant_reply": e.assistant_reply,
             })
+            if len(results) >= limit:
+                break
         return results
     finally:
         db.close()
@@ -266,7 +280,7 @@ async def run_poll_cycle(trigger: str = "scheduled") -> Dict:
             return {"status": "auth_required"}
 
         try:
-            msgs = list_recent_unread(service, max_results=25)
+            msgs = list_recent_messages(service, max_results=25)
         except Exception as exc:  # pragma: no cover - network failure guard
             logger.exception("Failed to list Gmail messages")
             await notify_all({"type": "error", "message": str(exc)})
@@ -299,6 +313,8 @@ async def run_poll_cycle(trigger: str = "scheduled") -> Dict:
                     continue
 
                 payload = extract_payload(full)
+                labels = [str(label or "").upper() for label in full.get("labelIds", [])]
+                is_unread = "UNREAD" in labels
                 internal_date = int(full.get("internalDate", "0"))
                 email_text = (
                     f"From: {payload['sender']}\n"
@@ -371,7 +387,7 @@ async def run_poll_cycle(trigger: str = "scheduled") -> Dict:
                     snippet=payload["snippet"],
                     body=payload["body"],
                     internal_date=internal_date,
-                    is_unread=True,
+                    is_unread=is_unread,
                     is_important=actionable_flag,
                     reply_needed=reply_flag,
                     importance_score=importance_score,

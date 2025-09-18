@@ -127,6 +127,11 @@ async function loadEmails() {
     senderRow.textContent = `From: ${e.sender}`;
     card.appendChild(senderRow);
 
+    const statusRow = document.createElement("div");
+    statusRow.className = "email-status " + (e.is_unread ? "unread" : "read");
+    statusRow.textContent = e.is_unread ? "Unread" : "Read";
+    card.appendChild(statusRow);
+
     if (e.internal_date) {
       const dateRow = document.createElement("div");
       dateRow.className = "email-date";
