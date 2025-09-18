@@ -12,6 +12,21 @@ from google.generativeai import types
 logger = logging.getLogger(__name__)
 MODEL_NAME = os.getenv("GOOGLE_GENAI_MODEL", "gemini-2.5-flash")
 
+MONTH_NAMES = (
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+)
+
 
 @lru_cache(maxsize=1)
 def _get_owner_context() -> dict[str, Any]:
@@ -266,6 +281,16 @@ def _looks_like_marketing(email_text: str) -> bool:
     if _is_roundup_subject(subject):
         return True
 
+    lines = lowered.splitlines()
+    for line in lines[:5]:
+        if "issue" not in line:
+            continue
+        if re.search(r"\bissue\s*(?:no\.?|number|#)?\s*(\d{1,4}|[ivxlcdm]{1,4})\b", line):
+            if any(month in line for month in MONTH_NAMES) or any(
+                keyword in line for keyword in ("news", "newsletter", "edition", "volume")
+            ):
+                return True
+
     sender = _extract_sender_line(email_text).lower()
     sender_cues = (
         "newsletter",
@@ -332,6 +357,21 @@ def _is_roundup_subject(subject: str) -> bool:
         return True
     if "flash sale" in subject_lower:
         return True
+
+    parts = re.split(r"\s*[-:]\s*", subject, maxsplit=1)
+    if len(parts) == 2:
+        prefix_lower = parts[0].strip().lower()
+        suffix = parts[1]
+        segments = [
+            segment.strip()
+            for segment in re.split(r"\s*,\s*|\s+\|\s+|\s+•\s+", suffix)
+            if segment.strip()
+        ]
+        if len(segments) >= 3 and any(
+            keyword in prefix_lower
+            for keyword in ("news", "newsletter", "update", "digest", "roundup", "highlights", "edition")
+        ):
+            return True
     return False
 
 

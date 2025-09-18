@@ -71,6 +71,21 @@ def test_looks_like_marketing_detects_roundup_subject():
     assert _looks_like_marketing(email_text) is True
 
 
+def test_looks_like_marketing_flags_newsletter_issue_header():
+    email_text = textwrap.dedent(
+        """
+        From: Jory at Font Awesome <jory@m.fontawesome.com>
+        Subject: Awesome News - Icon Puzzle, More Cowbell, Frame of Preference, Notdog
+
+        ISSUE 003 SEPTEMBER 2025 Hello folks! Welcome back! As the temperature slowly cools in New England
+        and the leaves start their march towards red and gold, we're excited to be entering: sweata weatha
+        """
+    ).strip()
+
+    assert _looks_like_marketing(email_text) is True
+    assert _has_reply_cue(email_text) is False
+
+
 def test_classify_handles_empty_model_response(monkeypatch):
     class DummyResponse:
         text = ""
