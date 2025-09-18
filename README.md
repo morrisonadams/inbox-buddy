@@ -40,6 +40,8 @@ cp backend/.env.sample backend/.env
 # edit backend/.env and paste your GOOGLE_GENAI_API_KEY
 ```
 
+Optionally set `INBOX_OWNER_NAME` (and comma separated `INBOX_OWNER_ALIASES`) to teach the classifier what you are called so it can treat name mentions as stronger reply cues.
+
 If you prefer to run OAuth outside of Docker just once, you can run `python backend/app.py` locally, then copy the generated `token.json` into `backend/token.json`. The Docker container will pick it up.
 
 ## Step 4. Start the stack
@@ -89,6 +91,7 @@ Then open http://localhost:8000/health to test, and point the frontend at `VITE_
 - First run of OAuth uses a local HTTP callback on port 8081 inside the API container. Your browser will open. If you hit issues, do the OAuth step once outside Docker and copy `token.json` into `backend/`.
 - Only read only Gmail scope is used. No send or modify actions are performed.
 - The classifier is tuned to only flag reply-needed when someone is clearly waiting on you. Tweak thresholds in `.env` or refine the prompt in `triage.py`.
+- Gmail polling ignores the Promotions tab (`-category:promotions` in the default search query) to avoid advertising noise.
 - Data stays local in `backend/db.sqlite3`.
 - If you prefer Vertex AI instead of AI Studio keys you can swap the Gemini client code.
 
