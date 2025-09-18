@@ -19,6 +19,7 @@ async function jpost(path, body) {
 const chatLog = document.getElementById("chatLog");
 const chatInput = document.getElementById("chatInput");
 const sendButton = document.getElementById("sendChat");
+const resetButton = document.getElementById("reset");
 
 function addMessage(role, text, extras = {}) {
   const bubble = document.createElement("div");
@@ -177,6 +178,8 @@ async function loadEmails() {
 }
 
 let sending = false;
+let resetting = false;
+let awaitingResetAck = false;
 
 async function sendChat() {
   if (sending) return;
@@ -203,6 +206,42 @@ async function sendChat() {
     sending = false;
     sendButton.disabled = false;
     chatInput.focus();
+  }
+}
+
+async function resetInbox() {
+  if (resetting) return;
+  const confirmed = window.confirm(
+    "Resetting clears stored emails so they can be reanalyzed. Continue?"
+  );
+  if (!confirmed) return;
+
+  resetting = true;
+  resetButton.disabled = true;
+  let requestSucceeded = false;
+  try {
+    awaitingResetAck = true;
+    const res = await jpost("/reset", {});
+    requestSucceeded = true;
+    const deleted = Number(res.deleted ?? 0);
+    const message = deleted
+      ? `Cleared ${deleted} stored email${deleted === 1 ? "" : "s"}. I'll reanalyze now.`
+      : "I cleared the stored emails. I'll reanalyze your inbox now.";
+    addMessage("assistant", message);
+    loadEmails();
+  } catch (err) {
+    awaitingResetAck = false;
+    addMessage(
+      "assistant",
+      "Sorry, I couldn't reset the inbox: " + err.message,
+      { error: true }
+    );
+  } finally {
+    resetting = false;
+    resetButton.disabled = false;
+    if (!requestSucceeded) {
+      awaitingResetAck = false;
+    }
   }
 }
 
@@ -283,6 +322,17 @@ function connectSSE() {
           `I ran into an error while polling Gmail: ${data.message}`,
           { error: true }
         );
+      } else if (data.type === "reset") {
+        const deleted = Number(data.deleted ?? 0);
+        if (awaitingResetAck) {
+          awaitingResetAck = false;
+        } else {
+          const message = deleted
+            ? `Stored email history was cleared (${deleted} message${deleted === 1 ? "" : "s"}).`
+            : "Stored email history was cleared.";
+          addMessage("assistant", message);
+        }
+        loadEmails();
       }
     } catch (err) {
       console.warn("Failed to parse SSE payload", err);
@@ -328,6 +378,7 @@ document.getElementById("connect").onclick = () =>
       alert("Authentication response received.");
     })
     .catch((e) => alert(e.message));
+resetButton.onclick = resetInbox;
 
 addMessage(
   "assistant",

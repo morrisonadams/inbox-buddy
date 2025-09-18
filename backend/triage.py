@@ -252,6 +252,14 @@ def _looks_like_marketing(email_text: str) -> bool:
         "discount",
         "coupon",
         "promo code",
+        "advertisement",
+        "this advertisement",
+        "sponsored",
+        "sponsor",
+        "partner offer",
+        "paid partnership",
+        "paid promotion",
+        "promotional email",
         "book now",
         "rent a car",
         "loyalty",
@@ -269,12 +277,25 @@ def _looks_like_marketing(email_text: str) -> bool:
         "view online",
         "privacy policy",
         "no longer wish to receive",
+        "why am i receiving",
+        "you received this email because",
+        "you are receiving this email because",
+        "you received this because",
         "newsletter",
         "digest",
         "webinar",
         "flash sale",
     )
+    marketing_regexes = (
+        r"\bthis (?:email|message) (?:is|was) (?:an )?advertisement\b",
+        r"\bpaid (?:partner|partnership|promotion)\b",
+        r"\bpartner(?:ship)? (?:offer|message)\b",
+        r"\bbrand partner\b",
+        r"\bmember exclusive offer\b",
+    )
     if any(cue in lowered for cue in marketing_cues):
+        return True
+    if any(re.search(pattern, lowered) for pattern in marketing_regexes):
         return True
 
     subject = _extract_subject_line(email_text)

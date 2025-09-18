@@ -71,6 +71,27 @@ def test_looks_like_marketing_detects_roundup_subject():
     assert _looks_like_marketing(email_text) is True
 
 
+def test_looks_like_marketing_detects_advertisement_disclaimer():
+    email_text = (
+        "From: Promo Alerts <ads@example.com>\n"
+        "Subject: Member exclusive offer just for you\n\n"
+        "This email is an advertisement from Promo Alerts.\n"
+        "You are receiving this email because you subscribed to our deals."
+    )
+
+    assert _looks_like_marketing(email_text) is True
+
+
+def test_looks_like_marketing_detects_sponsored_language():
+    email_text = (
+        "From: Travel Partners <hello@example.com>\n"
+        "Subject: A paid partnership highlight\n\n"
+        "Enjoy this sponsored message from our brand partners about upcoming getaways."
+    )
+
+    assert _looks_like_marketing(email_text) is True
+
+
 def test_looks_like_marketing_flags_newsletter_issue_header():
     email_text = textwrap.dedent(
         """
