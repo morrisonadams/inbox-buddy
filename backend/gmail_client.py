@@ -1,6 +1,8 @@
 import os
 import base64
+import re
 import time
+from html import unescape
 from typing import Dict, Optional, Tuple
 
 from google.oauth2.credentials import Credentials
@@ -8,6 +10,53 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"]
+
+
+def _decode_body_data(data: Optional[str]) -> str:
+    if not data:
+        return ""
+    padded = data + "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode(padded).decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def _html_to_text(html: str) -> str:
+    if not html:
+        return ""
+
+    # Remove scripts/styles first to avoid noise in the output.
+    cleaned = re.sub(r"(?is)<(script|style)[^>]*>.*?</\\1>", "", html)
+
+    replacements = {
+        r"(?is)<br\s*/?>": "\n",
+        r"(?is)</(p|div|section|article|h[1-6]|tr)>": "\n",
+        r"(?is)<(p|div|section|article|h[1-6]|tr)[^>]*>": "\n",
+        r"(?is)<li[^>]*>": "\n- ",
+        r"(?is)</li>": "\n",
+        r"(?is)</?(table|tbody|thead|tfoot)>": "\n",
+    }
+
+    for pattern, replacement in replacements.items():
+        cleaned = re.sub(pattern, replacement, cleaned)
+
+    cleaned = re.sub(r"(?is)<[^>]+>", "", cleaned)
+    cleaned = unescape(cleaned)
+    cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
+    cleaned = re.sub(r"[\t\u00a0]+", " ", cleaned)
+    cleaned = re.sub(r"\n\s+", "\n", cleaned)
+    cleaned = re.sub(r"\s+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _normalize_body(text: str) -> str:
+    if not text:
+        return ""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 class AuthRequired(Exception):
@@ -125,29 +174,47 @@ def get_message(service, msg_id: str) -> Dict:
 
 
 def extract_payload(message: Dict) -> Dict[str, Optional[str]]:
-    headers = {h["name"].lower(): h["value"] for h in message.get("payload", {}).get("headers", [])}
+    payload = message.get("payload", {}) or {}
+    headers = {h["name"].lower(): h["value"] for h in payload.get("headers", [])}
     subject = headers.get("subject", "")
     sender = headers.get("from", "")
     snippet = message.get("snippet", "")
 
-    body = ""
+    plain_parts: list[str] = []
+    html_parts: list[str] = []
 
-    def walk(parts):
-        nonlocal body
-        for p in parts:
-            if p.get("mimeType") == "text/plain" and p.get("body", {}).get("data"):
-                body += base64.urlsafe_b64decode(p["body"]["data"]).decode("utf-8", errors="ignore") + "\n"
-            elif p.get("parts"):
-                walk(p["parts"])
+    def collect(part: Dict) -> None:
+        mime = (part.get("mimeType") or "").lower()
 
-    payload = message.get("payload", {})
-    if payload.get("body", {}).get("data"):
-        try:
-            body = base64.urlsafe_b64decode(payload["body"]["data"]).decode("utf-8", errors="ignore")
-        except Exception:
-            body = ""
-    elif payload.get("parts"):
-        walk(payload["parts"])
+        if mime.startswith("multipart/"):
+            for sub in part.get("parts", []) or []:
+                collect(sub)
+            return
+
+        body_data = part.get("body", {}).get("data")
+        text = _decode_body_data(body_data)
+
+        if mime == "text/plain":
+            if text:
+                plain_parts.append(text)
+        elif mime == "text/html":
+            if text:
+                html_parts.append(text)
+        elif text and (mime.startswith("text/") or not mime):
+            plain_parts.append(text)
+
+        for sub in part.get("parts", []) or []:
+            collect(sub)
+
+    collect(payload)
+
+    if plain_parts:
+        body_text = "\n".join(part.strip() for part in plain_parts if part.strip())
+    else:
+        html_texts = [_html_to_text(part) for part in html_parts]
+        body_text = "\n\n".join(text for text in html_texts if text)
+
+    body = _normalize_body(body_text)
 
     return {
         "subject": subject,
