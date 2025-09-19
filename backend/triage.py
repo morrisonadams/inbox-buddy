@@ -28,6 +28,53 @@ MONTH_NAMES = (
 )
 
 
+PRIORITY_CONTACT_KEYWORDS = (
+    "redriverinsurance",
+)
+
+DOCUMENT_REQUEST_PHRASES = (
+    "fill out the attached",
+    "fill out and return",
+    "fill it out and send",
+    "complete the attached",
+    "complete and return",
+    "sign and return",
+    "sign and send back",
+    "return the completed",
+    "send back the completed",
+    "need the completed",
+    "signed copy",
+)
+
+DOCUMENT_REQUEST_NOUNS = (
+    "form",
+    "forms",
+    "document",
+    "documents",
+    "paperwork",
+    "application",
+    "applications",
+    "questionnaire",
+    "packet",
+    "authorization",
+    "certificate",
+    "agreement",
+)
+
+DOCUMENT_REQUEST_VERBS = (
+    "fill out",
+    "fill in",
+    "complete",
+    "sign",
+    "return",
+    "send back",
+    "send it back",
+    "submit",
+    "provide",
+    "email back",
+)
+
+
 @lru_cache(maxsize=1)
 def _get_owner_context() -> dict[str, Any]:
     name = os.getenv("INBOX_OWNER_NAME", "").strip()
@@ -356,6 +403,37 @@ def _mentions_user_name(email_text: str) -> bool:
     return False
 
 
+def _contains_priority_contact(email_text: str) -> bool:
+    lowered = email_text.lower()
+    if "red river" in lowered and "insurance" in lowered:
+        return True
+    return any(keyword in lowered for keyword in PRIORITY_CONTACT_KEYWORDS)
+
+
+def _contains_document_request(email_text: str) -> bool:
+    lowered = email_text.lower()
+    if any(phrase in lowered for phrase in DOCUMENT_REQUEST_PHRASES):
+        return True
+
+    has_document_noun = any(noun in lowered for noun in DOCUMENT_REQUEST_NOUNS)
+    if not has_document_noun:
+        return False
+
+    if any(verb in lowered for verb in DOCUMENT_REQUEST_VERBS):
+        return True
+
+    if "attach" in lowered and ("return" in lowered or "send" in lowered):
+        return True
+
+    return False
+
+
+def _should_override_marketing(email_text: str) -> bool:
+    if not _contains_priority_contact(email_text):
+        return False
+    return _contains_document_request(email_text)
+
+
 def _is_roundup_subject(subject: str) -> bool:
     if not subject:
         return False
@@ -406,10 +484,17 @@ def _has_list_unsubscribe(email_text: str) -> bool:
 
 
 def _has_reply_cue(email_text: str) -> bool:
-    if _looks_like_marketing(email_text):
+    document_request = _contains_document_request(email_text)
+    marketing = _looks_like_marketing(email_text)
+    override_marketing = _should_override_marketing(email_text)
+
+    if marketing and not override_marketing:
         return False
 
     lowered = email_text.lower()
+    if document_request:
+        return True
+
     explicit_phrases = (
         "please respond",
         "please reply",
@@ -748,6 +833,8 @@ def _safe_load_json(text: str) -> dict:
 
 def _default_classification(email_text: str, rationale: str) -> dict:
     marketing = _looks_like_marketing(email_text) or _has_list_unsubscribe(email_text)
+    if marketing and _should_override_marketing(email_text):
+        marketing = False
     reply_cue = _has_reply_cue(email_text)
     name_mentioned = _mentions_user_name(email_text)
 
@@ -837,6 +924,8 @@ def classify(email_text: str) -> dict:
         reply_needed = True
 
     marketing = _looks_like_marketing(email_text) or _has_list_unsubscribe(email_text)
+    if marketing and _should_override_marketing(email_text):
+        marketing = False
     name_mentioned = _mentions_user_name(email_text)
 
     if marketing:
