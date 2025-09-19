@@ -7,6 +7,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 import triage
 from triage import (
+    _default_classification,
     _has_reply_cue,
     _looks_like_marketing,
     _mentions_user_name,
@@ -59,6 +60,26 @@ def test_has_reply_cue_ignores_marketing_would_you_like_question():
     )
 
     assert _has_reply_cue(marketing_email) is False
+
+
+def test_document_request_from_priority_contact_overrides_marketing():
+    email_text = textwrap.dedent(
+        """
+        From: Red River Insurance <service@redriverinsurance.com>
+        Subject: Coverage update forms needed
+
+        Hi there,
+        Please fill out the attached coverage update form and send it back to us by Friday.
+        If you no longer wish to receive updates, you can unsubscribe here.
+        """
+    ).strip()
+
+    assert _looks_like_marketing(email_text) is True
+    assert _has_reply_cue(email_text) is True
+
+    fallback = _default_classification(email_text, "fallback")
+    assert fallback["importance"] is True
+    assert fallback["reply_needed"] is True
 
 
 def test_looks_like_marketing_detects_roundup_subject():
@@ -129,6 +150,35 @@ def test_classify_handles_empty_model_response(monkeypatch):
     assert result["importance"] is False
     assert result["reply_needed"] is False
     assert result["rationale"] == "Model response was empty."
+
+
+def test_classify_flags_priority_document_request_even_with_marketing(monkeypatch):
+    class DummyResponse:
+        text = ""
+        candidates: list[dict[str, str]] = []
+
+    class DummyModel:
+        def generate_content(self, *args, **kwargs):  # pragma: no cover - trivial
+            return DummyResponse()
+
+    monkeypatch.setattr(triage, "get_classifier_model", lambda: DummyModel())
+
+    email_text = textwrap.dedent(
+        """
+        From: Red River Insurance <intake@redriverinsurance.com>
+        Subject: Please complete the claim paperwork
+
+        Hello,
+        We still need the completed claim form from you. Please fill out the attached document and send it back today.
+        You can unsubscribe from status reminders at any time.
+        """
+    ).strip()
+
+    result = classify(email_text)
+
+    assert result["importance"] is True
+    assert result["reply_needed"] is True
+    assert result["reply_needed_score"] >= 0.6
 
 
 def test_mentions_user_name_detects_alias(monkeypatch):
